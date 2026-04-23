@@ -1,0 +1,1 @@
+/home/atr-lab/Desktop/mcp_approach/build/turtlebot3_fake_node/ament_cmake_environment_hooks/local_setup.zsh

@@ -1,0 +1,8 @@
+mcp
+openai
+python-dotenv
+rclpy
+pyyaml
+numpy
+opencv-python-headless
+matplotlib
