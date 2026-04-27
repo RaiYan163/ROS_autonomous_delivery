@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/home/atr-lab/Desktop/mcp_approach/src/turtlebot3_simulations/turtlebot3_gazebo/src/obstacles.cpp" "CMakeFiles/obstacles.dir/src/obstacles.cpp.o" "gcc" "CMakeFiles/obstacles.dir/src/obstacles.cpp.o.d"
+  "/home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/src/turtlebot3_simulations/turtlebot3_gazebo/src/obstacles.cpp" "CMakeFiles/obstacles.dir/src/obstacles.cpp.o" "gcc" "CMakeFiles/obstacles.dir/src/obstacles.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

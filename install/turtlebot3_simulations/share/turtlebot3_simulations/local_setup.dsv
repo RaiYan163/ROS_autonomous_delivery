@@ -1,1 +1,2 @@
-/home/atr-lab/Desktop/mcp_approach/build/turtlebot3_simulations/ament_cmake_environment_hooks/local_setup.dsv
+source;share/turtlebot3_simulations/environment/ament_prefix_path.sh
+source;share/turtlebot3_simulations/environment/path.sh

@@ -57,10 +57,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/atr-lab/Desktop/mcp_approach/src/turtlebot3_simulations/turtlebot3_fake_node
+CMAKE_SOURCE_DIR = /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/src/turtlebot3_simulations/turtlebot3_fake_node
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/atr-lab/Desktop/mcp_approach/build/turtlebot3_fake_node
+CMAKE_BINARY_DIR = /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/turtlebot3_fake_node
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -142,9 +142,9 @@ install/strip/fast: preinstall/fast
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/atr-lab/Desktop/mcp_approach/build/turtlebot3_fake_node/CMakeFiles /home/atr-lab/Desktop/mcp_approach/build/turtlebot3_fake_node//CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/turtlebot3_fake_node/CMakeFiles /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/turtlebot3_fake_node//CMakeFiles/progress.marks
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/atr-lab/Desktop/mcp_approach/build/turtlebot3_fake_node/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/turtlebot3_fake_node/CMakeFiles 0
 .PHONY : all
 
 # The main clean target

@@ -1,0 +1,8 @@
+Metadata-Version: 2.1
+Name: custom-turtlebot-nodes
+Version: 0.0.0
+Summary: Custom TurtleBot3 Python nodes (joystick teleop and utilities).
+Maintainer: atr-lab
+Maintainer-email: raiyanashraf11@gmail.com
+License: Apache-2.0
+Provides-Extra: test

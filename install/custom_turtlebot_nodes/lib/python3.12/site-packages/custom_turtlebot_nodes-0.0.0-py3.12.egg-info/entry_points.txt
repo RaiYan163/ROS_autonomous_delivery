@@ -1,0 +1,2 @@
+[console_scripts]
+joystick_teleop = custom_turtlebot_nodes.joystick_teleop:main

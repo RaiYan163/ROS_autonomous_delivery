@@ -1,7 +1,7 @@
 CMakeFiles/turtlebot3_fake_node.dir/src/turtlebot3_fake_node.cpp.o: \
- /home/atr-lab/Desktop/mcp_approach/src/turtlebot3_simulations/turtlebot3_fake_node/src/turtlebot3_fake_node.cpp \
+ /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/src/turtlebot3_simulations/turtlebot3_fake_node/src/turtlebot3_fake_node.cpp \
  /usr/include/stdc-predef.h \
- /home/atr-lab/Desktop/mcp_approach/src/turtlebot3_simulations/turtlebot3_fake_node/include/turtlebot3_fake_node/turtlebot3_fake_node.hpp \
+ /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/src/turtlebot3_simulations/turtlebot3_fake_node/include/turtlebot3_fake_node/turtlebot3_fake_node.hpp \
  /usr/include/c++/13/chrono /usr/include/c++/13/bits/requires_hosted.h \
  /usr/include/x86_64-linux-gnu/c++/13/bits/c++config.h \
  /usr/include/x86_64-linux-gnu/c++/13/bits/os_defines.h \

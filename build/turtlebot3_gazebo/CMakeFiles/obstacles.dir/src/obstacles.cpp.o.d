@@ -1,7 +1,7 @@
 CMakeFiles/obstacles.dir/src/obstacles.cpp.o: \
- /home/atr-lab/Desktop/mcp_approach/src/turtlebot3_simulations/turtlebot3_gazebo/src/obstacles.cpp \
+ /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/src/turtlebot3_simulations/turtlebot3_gazebo/src/obstacles.cpp \
  /usr/include/stdc-predef.h \
- /home/atr-lab/Desktop/mcp_approach/src/turtlebot3_simulations/turtlebot3_gazebo/include/turtlebot3_gazebo/obstacles.hpp \
+ /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/src/turtlebot3_simulations/turtlebot3_gazebo/include/turtlebot3_gazebo/obstacles.hpp \
  /usr/include/c++/13/chrono /usr/include/c++/13/bits/requires_hosted.h \
  /usr/include/x86_64-linux-gnu/c++/13/bits/c++config.h \
  /usr/include/x86_64-linux-gnu/c++/13/bits/os_defines.h \

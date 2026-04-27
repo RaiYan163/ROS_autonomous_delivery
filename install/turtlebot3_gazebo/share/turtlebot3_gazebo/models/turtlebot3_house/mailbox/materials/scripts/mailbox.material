@@ -1,1 +1,29 @@
-/home/atr-lab/Desktop/mcp_approach/src/turtlebot3_simulations/turtlebot3_gazebo/models/turtlebot3_house/mailbox/materials/scripts/mailbox.material
+material Mailbox/Diffuse
+{
+  receive_shadows off
+  technique
+  {
+    pass
+    {
+      texture_unit
+      {
+        texture Mailbox_Diffuse.png
+      }
+    }
+  }
+}
+
+material Mailbox/Specular
+{
+  receive_shadows off
+  technique
+  {
+    pass
+    {
+      texture_unit
+      {
+        texture Mailbox_Spec.png
+      }
+    }
+  }
+}

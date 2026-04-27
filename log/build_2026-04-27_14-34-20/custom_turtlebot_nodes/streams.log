@@ -1,0 +1,25 @@
+[0.570s] Invoking command in '/home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/src/custom_turtlebot_nodes': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/custom_turtlebot_nodes/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/install/custom_turtlebot_nodes/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/custom_turtlebot_nodes build --build-base /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/custom_turtlebot_nodes/build install --record /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/custom_turtlebot_nodes/install.log --single-version-externally-managed install_data
+[0.736s] running egg_info
+[0.747s] writing ../../build/custom_turtlebot_nodes/custom_turtlebot_nodes.egg-info/PKG-INFO
+[0.747s] writing dependency_links to ../../build/custom_turtlebot_nodes/custom_turtlebot_nodes.egg-info/dependency_links.txt
+[0.747s] writing entry points to ../../build/custom_turtlebot_nodes/custom_turtlebot_nodes.egg-info/entry_points.txt
+[0.747s] writing requirements to ../../build/custom_turtlebot_nodes/custom_turtlebot_nodes.egg-info/requires.txt
+[0.747s] writing top-level names to ../../build/custom_turtlebot_nodes/custom_turtlebot_nodes.egg-info/top_level.txt
+[0.771s] reading manifest file '../../build/custom_turtlebot_nodes/custom_turtlebot_nodes.egg-info/SOURCES.txt'
+[0.771s] writing manifest file '../../build/custom_turtlebot_nodes/custom_turtlebot_nodes.egg-info/SOURCES.txt'
+[0.771s] running build
+[0.772s] running build_py
+[0.772s] copying custom_turtlebot_nodes/joystick_teleop.py -> /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/custom_turtlebot_nodes/build/lib/custom_turtlebot_nodes
+[0.772s] running install
+[0.776s] running install_lib
+[0.788s] copying /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/custom_turtlebot_nodes/build/lib/custom_turtlebot_nodes/joystick_teleop.py -> /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/install/custom_turtlebot_nodes/lib/python3.12/site-packages/custom_turtlebot_nodes
+[0.789s] byte-compiling /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/install/custom_turtlebot_nodes/lib/python3.12/site-packages/custom_turtlebot_nodes/joystick_teleop.py to joystick_teleop.cpython-312.pyc
+[0.790s] running install_data
+[0.790s] copying launch/joystick_teleop.launch.py -> /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/install/custom_turtlebot_nodes/share/custom_turtlebot_nodes/launch
+[0.790s] running install_egg_info
+[0.803s] removing '/home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/install/custom_turtlebot_nodes/lib/python3.12/site-packages/custom_turtlebot_nodes-0.0.0-py3.12.egg-info' (and everything under it)
+[0.804s] Copying ../../build/custom_turtlebot_nodes/custom_turtlebot_nodes.egg-info to /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/install/custom_turtlebot_nodes/lib/python3.12/site-packages/custom_turtlebot_nodes-0.0.0-py3.12.egg-info
+[0.804s] running install_scripts
+[0.881s] Installing joystick_teleop script to /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/install/custom_turtlebot_nodes/lib/custom_turtlebot_nodes
+[0.882s] writing list of installed files to '/home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/custom_turtlebot_nodes/install.log'
+[0.900s] Invoked command in '/home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/src/custom_turtlebot_nodes' returned '0': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/custom_turtlebot_nodes/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/install/custom_turtlebot_nodes/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/custom_turtlebot_nodes build --build-base /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/custom_turtlebot_nodes/build install --record /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/custom_turtlebot_nodes/install.log --single-version-externally-managed install_data

@@ -53,10 +53,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/atr-lab/Desktop/mcp_approach/src/turtlebot3_simulations/turtlebot3_fake_node
+CMAKE_SOURCE_DIR = /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/src/turtlebot3_simulations/turtlebot3_fake_node
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/atr-lab/Desktop/mcp_approach/build/turtlebot3_fake_node
+CMAKE_BINARY_DIR = /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/turtlebot3_fake_node
 
 # Utility rule file for uninstall.
 
@@ -78,6 +78,6 @@ CMakeFiles/uninstall.dir/clean:
 .PHONY : CMakeFiles/uninstall.dir/clean
 
 CMakeFiles/uninstall.dir/depend:
-	cd /home/atr-lab/Desktop/mcp_approach/build/turtlebot3_fake_node && $(CMAKE_COMMAND) -E cmake_depends "Unix Makefiles" /home/atr-lab/Desktop/mcp_approach/src/turtlebot3_simulations/turtlebot3_fake_node /home/atr-lab/Desktop/mcp_approach/src/turtlebot3_simulations/turtlebot3_fake_node /home/atr-lab/Desktop/mcp_approach/build/turtlebot3_fake_node /home/atr-lab/Desktop/mcp_approach/build/turtlebot3_fake_node /home/atr-lab/Desktop/mcp_approach/build/turtlebot3_fake_node/CMakeFiles/uninstall.dir/DependInfo.cmake "--color=$(COLOR)"
+	cd /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/turtlebot3_fake_node && $(CMAKE_COMMAND) -E cmake_depends "Unix Makefiles" /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/src/turtlebot3_simulations/turtlebot3_fake_node /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/src/turtlebot3_simulations/turtlebot3_fake_node /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/turtlebot3_fake_node /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/turtlebot3_fake_node /home/atr-lab/Desktop/main_workstation/ROS_autonomous_delivery/build/turtlebot3_fake_node/CMakeFiles/uninstall.dir/DependInfo.cmake "--color=$(COLOR)"
 .PHONY : CMakeFiles/uninstall.dir/depend
 
