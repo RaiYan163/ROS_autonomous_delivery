@@ -1,0 +1,2 @@
+[21:57:35][INFO   ][ROS     ] Node started — subscribed to /amcl_pose, /battery_state
+[21:57:35][INFO   ][SYSTEM  ] GUI started — TurtleBot Navigation and Control Center
