@@ -8,6 +8,7 @@
 # The script sources the ROS2 base layer and the workspace overlay, then
 # starts the GUI.  Edit the ROS_DISTRO variable if you are on a different
 # ROS2 release (default: jazzy).
+# DDS / model / RMW defaults are applied inside turtlebot_gui.py (ROS_* constants).
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
 

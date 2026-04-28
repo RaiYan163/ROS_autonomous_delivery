@@ -10,10 +10,13 @@ Or manually (from workspace root):
     source /opt/ros/jazzy/setup.bash && source install/setup.bash
     python3 control_center/turtlebot_gui.py
 
+    Environment defaults (domain, model, RMW) are module constants just below the imports.
+
 Pages
 -----
   Turtlebot — main dashboard (panels below).
-  Initialisation — map / pose startup (stub; content TBD).
+  Initialisation — map path, ROS CLI diagnostics (topic echo/hz/node list),
+                    launch shortcuts, emergency zero cmd_vel.
 
 Panels (Turtlebot page)
 --------
@@ -22,21 +25,38 @@ Panels (Turtlebot page)
   3. Save Location    – name + save current pose to JSON
   4. Saved Locations  – dropdown of stored waypoints
   5. Auto-Navigation  – send Nav2 goal, cancel, recover, update, delete
-  6. Navigation Status– goal state and distance remaining from Nav2 feedback
-  7. Event Log        – timestamped log with level filtering
+  6. Navigation — Enable/Disable stack + goal state / distance / events
+  7. Logs — Event log or Navigation log (ros2 launch stdout), toggle buttons
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
 import queue
+import signal
 import subprocess
+import sys
 import threading
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROS 2 environment defaults — edit here (applied before rclpy / ros2 subprocesses).
+# DDS domain must match TurtleBot PC and every terminal that should share topics.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ROS_DOMAIN_ID      = 25                      # int 0–232 typically
+TURTLEBOT3_MODEL   = "burger"
+RMW_IMPLEMENTATION = "rmw_fastrtps_cpp"
+
+os.environ["ROS_DOMAIN_ID"]        = str(ROS_DOMAIN_ID)
+os.environ["TURTLEBOT3_MODEL"]     = TURTLEBOT3_MODEL
+os.environ["RMW_IMPLEMENTATION"]   = RMW_IMPLEMENTATION
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Paths  (all resolved relative to this file so it works from any cwd)
@@ -46,6 +66,69 @@ WORKSPACE_ROOT = SCRIPT_DIR.parent
 LOCATIONS_FILE = SCRIPT_DIR / "config" / "saved_locations.json"
 LOGS_DIR       = SCRIPT_DIR / "logs"
 MAP_YAML       = WORKSPACE_ROOT / "real_map" / "test_map.yaml"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subprocess teardown for ``ros2 launch`` (whole tree incl. RViz)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _shutdown_ros_launch_process(proc: subprocess.Popen | None) -> None:
+    """
+    Mimic Ctrl+C in the launch terminal: signal the entire process group so
+    ``ros2 launch`` tears down RViz, Nav2, and spawned nodes.
+
+    Launches must be started with ``start_new_session=True`` (POSIX) so children
+    share one process group.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+
+    if sys.platform == "win32":
+        proc.terminate()
+        try:
+            proc.wait(timeout=6)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+        return
+
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+    except (ProcessLookupError, PermissionError):
+        proc.send_signal(signal.SIGINT)
+    except OSError:
+        proc.terminate()
+
+    try:
+        proc.wait(timeout=12)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    if proc.poll() is not None:
+        return
+
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        proc.terminate()
+
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+    if proc.poll() is not None:
+        return
+
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        proc.kill()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Design tokens  (Catppuccin Mocha palette — readable dark theme)
@@ -91,8 +174,9 @@ ROS_AVAILABLE = False
 try:
     import rclpy
     from action_msgs.msg import GoalStatus
-    from geometry_msgs.msg import PoseWithCovarianceStamped
+    from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
     from nav2_msgs.action import NavigateToPose
+    from nav_msgs.msg import Odometry
     from rclpy.action import ActionClient
     from rclpy.node import Node
     from sensor_msgs.msg import BatteryState, Joy
@@ -132,6 +216,12 @@ if ROS_AVAILABLE:
             self.create_subscription(
                 Joy, "/joy", self._on_joy, 10
             )
+            self.create_subscription(
+                Odometry, "/odom", self._on_odom, 10
+            )
+            self._cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
+            self._last_odom_push_ns = 0
+
             # Periodic check: if no /joy message arrives for 2 s → disconnected
             self.create_timer(1.0, self._check_joy_timeout)
 
@@ -253,7 +343,20 @@ if ROS_AVAILABLE:
                 self._q.put(("joy_status", "disconnected"))
                 self._q.put(("log", "WARNING", "TELEOP", "Joystick signal lost (timeout)"))
 
+        # ── Odometry (throttled) + zero cmd_vel ────────────────────────────────
 
+        def publish_zero_twist(self) -> None:
+            """Emergency stop: publish zero Twist on /cmd_vel."""
+            self._cmd_vel_pub.publish(Twist())
+
+        def _on_odom(self, msg: Odometry) -> None:
+            ns = self.get_clock().now().nanoseconds
+            if ns - self._last_odom_push_ns < 80_000_000:  # ≤12.5 Hz
+                return
+            self._last_odom_push_ns = ns
+            vx = msg.twist.twist.linear.x
+            wz = msg.twist.twist.angular.z
+            self._q.put(("odom_vel", vx, wz))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Reusable styled widget helpers
@@ -365,8 +468,15 @@ class TeachNavGUI:
         self._locations: dict = {}
         self._log_filter     = "all"              # "all" | "errors"
         self._all_log_lines: list[tuple[str, str]] = []  # [(level, formatted_line)]
+        # Right-hand log panel: "event" (GUI) vs "navigation" (ros2 launch stream)
+        self._log_panel_mode: str = "event"
+        self._nav_launch_log: deque[str] = deque(maxlen=8000)
 
-
+        # Long-running ros2 CLI helpers (echo / hz) — distinct from nav/teleop launches
+        self._tool_procs: dict[str, subprocess.Popen] = {}
+        self._init_tool_btns: dict[str, tk.Button] = {}
+        self._init_tool_short: dict[str, str] = {}
+        self._closing_gui = False
         self._setup_window()
         self._load_locations()
         self._build_nav_and_pages()
@@ -449,7 +559,7 @@ class TeachNavGUI:
     # ── Page switching ───────────────────────────────────────────────────────
 
     def _build_nav_and_pages(self) -> None:
-        """Build Turtlebot dashboard and Initialisation stub; default to Turtlebot."""
+        """Build Turtlebot dashboard and Initialisation page; default to Turtlebot."""
         self._build_layout(self._page_turtlebot)
         self._build_initialisation_page(self._page_init)
         self._switch_page("turtlebot")
@@ -477,24 +587,164 @@ class TeachNavGUI:
                           activebackground=C["surface2"], activeforeground=C["text"])
 
     def _build_initialisation_page(self, parent: tk.Widget) -> None:
-        """
-        Stub for upcoming initialisation workflows (localisation, AMCL pose, etc.).
-        Layout matches the app's card styling so extending it stays consistent.
-        """
+        """Map path (`real_map`), launch shortcuts, `ros2 topic echo` / `hz`, node list, zero cmd_vel."""
+        self._init_tool_btns.clear()
+        self._init_tool_short.clear()
+
         wrapper = tk.Frame(parent, bg=C["base"])
         wrapper.pack(fill="both", expand=True, padx=10, pady=(8, 14))
 
-        outer, inner = make_panel(wrapper, "🧭  Initialisation")
+        # ── Panel 1 — map + same launches as System Control ─────────────────
+        outer_map, inner_map = make_panel(wrapper, "🗺   Map & bring-up commands")
+        map_resolved = MAP_YAML.resolve()
+        tk.Label(
+            inner_map,
+            text="Navigation map YAML (workspace real_map/):",
+            font=FONT_BODY,
+            bg=C["surface0"],
+            fg=C["subtext"],
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            inner_map,
+            text=str(map_resolved),
+            font=FONT_MONO,
+            bg=C["surface0"],
+            fg=C["sky"],
+            anchor="w",
+            justify="left",
+            wraplength=1100,
+        ).pack(anchor="w", pady=(0, 10))
 
-        make_label(inner,
-                   "Prepare this area for startup steps you need before driving — "
-                   "for example map loading, RViz poses, AMCL initialise, simulation flags, …",
-                   color="subtext").pack(anchor="w", pady=(0, 12))
+        row_la = tk.Frame(inner_map, bg=C["surface0"])
+        row_la.pack(fill="x", pady=(0, 6))
+        make_btn(
+            row_la, "Start Navigation + RViz", self._start_navigation, color="green"
+        ).pack(side="left", padx=(0, 5))
+        make_btn(
+            row_la, "Start Joystick Teleop", self._start_teleop, color="blue"
+        ).pack(side="left", padx=(0, 5))
+        make_btn(
+            row_la, "Stop Navigation", self._stop_navigation, color="orange"
+        ).pack(side="left", padx=(0, 5))
+        make_btn(
+            row_la, "Stop Teleop", self._stop_teleop, color="orange"
+        ).pack(side="left")
 
-        tk.Label(inner, text=(
-            "We'll wire concrete controls here in the next step."
-        ), font=FONT_BODY, bg=C["surface0"], fg=C["overlay0"], justify="left",
-                 wraplength=720).pack(anchor="w")
+        row_lb = tk.Frame(inner_map, bg=C["surface0"])
+        row_lb.pack(fill="x")
+        make_btn(
+            row_lb,
+            "Emergency zero /cmd_vel",
+            self._emergency_zero_cmd_vel,
+            color="red",
+        ).pack(side="left", padx=(0, 5))
+        make_btn(
+            row_lb, "ros2 node list", self._run_ros_node_list, color="gray"
+        ).pack(side="left")
+
+        outer_map.pack(fill="x", pady=(0, 8))
+
+        # ── Panel 2 — subprocess mirrors of `ros2 topic echo` / `hz` ───────
+        outer_mon, inner_mon = make_panel(
+            wrapper, "📡   CLI topic monitors  (ros2 topic echo · ros2 topic hz)"
+        )
+        make_label(
+            inner_mon,
+            "Toggle a stream to append lines to the log below. "
+            "Turn off again, use Stop all, or quit the app to end the process.",
+            color="subtext",
+        ).pack(anchor="w", pady=(0, 8))
+
+        echo_topics: list[tuple[str, str]] = [
+            ("/amcl_pose", "echo /amcl_pose"),
+            ("/battery_state", "echo /battery"),
+            ("/odom", "echo /odom"),
+            ("/scan", "echo /scan"),
+            ("/tf", "echo /tf"),
+        ]
+        grid_echo = tk.Frame(inner_mon, bg=C["surface0"])
+        grid_echo.pack(fill="x", pady=(0, 6))
+        for i, (topic, short) in enumerate(echo_topics):
+            key = f"echo:{topic}"
+            self._init_tool_short[key] = short
+            b = make_btn(
+                grid_echo,
+                f"  {short}  □",
+                command=lambda t=topic: self._toggle_topic_echo(t),
+                color="gray",
+            )
+            b.grid(row=i // 3, column=i % 3, padx=(0, 8), pady=4, sticky="w")
+            self._init_tool_btns[key] = b
+
+        row_hz = tk.Frame(inner_mon, bg=C["surface0"])
+        row_hz.pack(fill="x")
+        hz_key = "hz:/amcl_pose"
+        self._init_tool_short[hz_key] = "hz /amcl_pose"
+        b_hz = make_btn(
+            row_hz,
+            "  hz /amcl_pose  □",
+            self._toggle_topic_hz_amcl,
+            color="gray",
+        )
+        b_hz.pack(side="left", padx=(0, 8))
+        self._init_tool_btns[hz_key] = b_hz
+        make_btn(
+            row_hz,
+            "Stop all ROS CLI monitors",
+            self._stop_all_init_monitors,
+            color="orange",
+        ).pack(side="left", padx=(12, 0))
+
+        outer_mon.pack(fill="x", pady=(0, 8))
+
+        # ── Panel 3 — combined stdout from echo/hz + messages ───────────────
+        outer_log, inner_log = make_panel(wrapper, "📋   Initialisation log")
+        inner_log.columnconfigure(0, weight=1)
+        inner_log.rowconfigure(0, weight=1)
+
+        self._init_log_text = tk.Text(
+            inner_log,
+            font=FONT_MONO,
+            bg=C["mantle"],
+            fg=C["text"],
+            relief="flat",
+            bd=4,
+            wrap="word",
+            state="disabled",
+            height=20,
+            insertbackground=C["text"],
+            selectbackground=C["surface1"],
+        )
+        sb = tk.Scrollbar(
+            inner_log,
+            command=self._init_log_text.yview,
+            bg=C["surface0"],
+            troughcolor=C["mantle"],
+            activebackground=C["surface1"],
+        )
+        self._init_log_text.configure(yscrollcommand=sb.set)
+        self._init_log_text.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
+        sb.grid(row=0, column=1, sticky="ns", pady=(0, 6))
+
+        row_clr = tk.Frame(inner_log, bg=C["surface0"])
+        row_clr.grid(row=1, column=0, columnspan=2, sticky="ew")
+        make_btn(
+            row_clr, "Clear log", lambda: self._clear_init_log(), color="gray"
+        ).pack(side="left")
+
+        outer_log.pack(fill="both", expand=True)
+
+        self._append_init_log(
+            "Initialisation page — map is real_map/test_map.yaml via Start Navigation + RViz.\n"
+            "Use the toggles for the same output as `ros2 topic echo …` and `ros2 topic hz /amcl_pose`.\n\n"
+        )
+
+    def _clear_init_log(self) -> None:
+        w = self._init_log_text
+        w.config(state="normal")
+        w.delete("1.0", "end")
+        w.config(state="disabled")
 
     # ── Two-column body layout — Turtlebot page only ──────────────────────────
 
@@ -599,6 +849,7 @@ class TeachNavGUI:
         self._battery_lbl.pack(side="left")
 
         self._pose_lbl = kv_row(inner, "Pose:", "x=—    y=—    yaw=—", "text")
+        self._odom_lbl = kv_row(inner, "/odom:", "vx=—    ωz=—", "sky")
 
         return outer
 
@@ -758,11 +1009,32 @@ class TeachNavGUI:
         return outer
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Panel 7 — Navigation Status
+    # Panel — Navigation strip (Enable/Disable · goal status)
     # ─────────────────────────────────────────────────────────────────────────
 
     def _build_navstatus_panel(self, parent: tk.Widget) -> tk.Frame:
-        outer, inner = make_panel(parent, "📊  Navigation Status")
+        outer, inner = make_panel(parent, "🧭  Navigation")
+
+        nav_btns = tk.Frame(inner, bg=C["surface0"])
+        nav_btns.pack(fill="x", pady=(0, 8))
+        self._btn_nav_enable = make_btn(
+            nav_btns,
+            "Enable",
+            self._start_navigation,
+            color="green",
+            width=10,
+        )
+        self._btn_nav_enable.pack(side="left", padx=(0, 6))
+        self._btn_nav_disable = make_btn(
+            nav_btns,
+            "Disable",
+            self._stop_navigation,
+            color="orange",
+            width=10,
+        )
+        self._btn_nav_disable.pack(side="left")
+
+        self._btn_nav_disable.config(state=tk.DISABLED)
 
         # Two compact side-by-side pairs
         row_a = tk.Frame(inner, bg=C["surface0"])
@@ -786,13 +1058,126 @@ class TeachNavGUI:
         return outer
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Panel 7 — Event Log
+    # Log split view — Event (GUI messages) vs Navigation (ros2 launch stream)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _rewrite_event_display(self) -> None:
+        """Redraw the upper-right text widget from `_all_log_lines` per `_log_filter`."""
+        self._log_text.config(state="normal")
+        self._log_text.delete("1.0", "end")
+        for level, line in self._all_log_lines:
+            if self._log_filter == "all" or level in ("ERROR", "WARNING"):
+                self._log_text.insert("end", line + "\n", level)
+        self._log_text.see("end")
+        self._log_text.config(state="disabled")
+
+    def _rewrite_navigation_display(self) -> None:
+        """Redraw navigation launch output (buffer only; no ROS calls)."""
+        self._log_text.config(state="normal")
+        self._log_text.delete("1.0", "end")
+        nav_body = "".join(self._nav_launch_log)
+        if nav_body:
+            self._log_text.insert("1.0", nav_body, "NAVOUT")
+        else:
+            self._log_text.insert(
+                "1.0",
+                "(No navigation launch output yet — use Start Navigation or Enable.)\n",
+                "DEBUG",
+            )
+        self._log_text.see("end")
+        self._log_text.config(state="disabled")
+
+    def _refresh_log_filter_button_state(self) -> None:
+        st = tk.NORMAL if self._log_panel_mode == "event" else tk.DISABLED
+        if hasattr(self, "_btn_log_show_all"):
+            self._btn_log_show_all.config(state=st)
+            self._btn_log_errors.config(state=st)
+
+    def _refresh_log_mode_buttons(self) -> None:
+        if getattr(self, "_btn_log_event", None) is None:
+            return
+        if self._log_panel_mode == "event":
+            self._btn_log_event.config(
+                bg=C["blue"], fg=C["base"], activeforeground=C["base"])
+            self._btn_log_nav.config(
+                bg=C["surface1"], fg=C["subtext"], activeforeground=C["text"])
+        else:
+            self._btn_log_event.config(
+                bg=C["surface1"], fg=C["subtext"], activeforeground=C["text"])
+            self._btn_log_nav.config(
+                bg=C["blue"], fg=C["base"], activeforeground=C["base"])
+        self._refresh_log_filter_button_state()
+
+    def _set_log_panel_mode(self, mode: str) -> None:
+        if mode not in ("event", "navigation"):
+            return
+        if mode == self._log_panel_mode:
+            self._refresh_log_mode_buttons()
+            return
+        self._log_panel_mode = mode
+        if mode == "event":
+            self._rewrite_event_display()
+        else:
+            self._rewrite_navigation_display()
+        self._refresh_log_mode_buttons()
+
+    def _append_nav_launch_line(self, text: str) -> None:
+        """Accumulate ros2 navigation launch stdout/stderr; update UI if Navigation log visible."""
+        self._nav_launch_log.append(text)
+        if self._log_panel_mode != "navigation":
+            return
+        self._log_text.config(state="normal")
+        self._log_text.insert("end", text, "NAVOUT")
+        self._log_text.see("end")
+        self._log_text.config(state="disabled")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Panel 7 — Logs (Event vs Navigation)
     # ─────────────────────────────────────────────────────────────────────────
 
     def _build_log_panel(self, parent: tk.Widget) -> tk.Frame:
-        outer, inner = make_panel(parent, "📋  Event Log")
-        inner.rowconfigure(0, weight=1, minsize=280)
+        outer, inner = make_panel(parent, "📋  Logs")
+        inner.rowconfigure(1, weight=1, minsize=280)
         inner.columnconfigure(0, weight=1)
+
+        mode_row = tk.Frame(inner, bg=C["surface0"])
+        mode_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        tk.Label(
+            mode_row,
+            text="View:",
+            font=FONT_BODY,
+            bg=C["surface0"],
+            fg=C["subtext"],
+        ).pack(side="left", padx=(0, 8))
+        self._btn_log_event = tk.Button(
+            mode_row,
+            text=" Event log ",
+            command=lambda: self._set_log_panel_mode("event"),
+            font=FONT_BODY,
+            relief="flat",
+            cursor="hand2",
+            bd=0,
+            padx=10,
+            pady=5,
+        )
+        self._btn_log_event.pack(side="left", padx=(0, 6))
+        self._btn_log_nav = tk.Button(
+            mode_row,
+            text=" Navigation log ",
+            command=lambda: self._set_log_panel_mode("navigation"),
+            font=FONT_BODY,
+            relief="flat",
+            cursor="hand2",
+            bd=0,
+            padx=10,
+            pady=5,
+        )
+        self._btn_log_nav.pack(side="left")
+        make_label(
+            mode_row,
+            "ros2 launch output when Navigation is enabled",
+            color="overlay0",
+        ).pack(side="left", padx=(12, 0))
 
         self._log_text = tk.Text(
             inner, font=FONT_MONO, bg=C["mantle"], fg=C["text"],
@@ -805,23 +1190,28 @@ class TeachNavGUI:
                                  bg=C["surface0"], troughcolor=C["mantle"],
                                  activebackground=C["surface1"])
         self._log_text.configure(yscrollcommand=scrollbar.set)
-        self._log_text.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
-        scrollbar.grid(row=0, column=1, sticky="ns", pady=(0, 6))
+        self._log_text.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
+        scrollbar.grid(row=1, column=1, sticky="ns", pady=(0, 6))
 
-        # Colour tags — each log level gets its own foreground colour
+        # Colour tags — each event log level gets its own foreground colour
         self._log_text.tag_configure("INFO",    foreground=C["text"])
         self._log_text.tag_configure("SUCCESS", foreground=C["green"])
         self._log_text.tag_configure("WARNING", foreground=C["yellow"])
         self._log_text.tag_configure("ERROR",   foreground=C["red"])
         self._log_text.tag_configure("DEBUG",   foreground=C["overlay0"])
+        self._log_text.tag_configure("NAVOUT",  foreground=C["teal"])
 
         # Button row below the log
         btn_row = tk.Frame(inner, bg=C["surface0"])
-        btn_row.grid(row=1, column=0, columnspan=2, sticky="ew")
+        btn_row.grid(row=2, column=0, columnspan=2, sticky="ew")
         make_btn(btn_row, "Clear",       self._clear_log,        color="gray").pack(side="left", padx=(0, 4))
         make_btn(btn_row, "Save Log",    self._save_log,         color="gray").pack(side="left", padx=(0, 4))
-        make_btn(btn_row, "Show All",    self._show_all_logs,    color="gray").pack(side="left", padx=(0, 4))
-        make_btn(btn_row, "Errors Only", self._show_errors_only, color="red" ).pack(side="left")
+        self._btn_log_show_all = make_btn(btn_row, "Show All", self._show_all_logs, color="gray")
+        self._btn_log_show_all.pack(side="left", padx=(0, 4))
+        self._btn_log_errors = make_btn(btn_row, "Errors Only", self._show_errors_only, color="red")
+        self._btn_log_errors.pack(side="left")
+
+        self._refresh_log_mode_buttons()
 
         return outer
 
@@ -835,9 +1225,12 @@ class TeachNavGUI:
             return
         cmd = [
             "ros2", "launch", "turtlebot3_navigation2", "navigation2.launch.py",
-            "use_sim_time:=false", f"map:={MAP_YAML}",
+            "use_sim_time:=false", f"map:={MAP_YAML.resolve()}",
         ]
-        self._launch_proc("nav", cmd)
+        self._append_nav_launch_line(
+            f"--- starting: {' '.join(cmd)} ---\n",
+        )
+        self._launch_navigation_streaming(cmd)
         self._log("INFO", "NAV", f"Navigation launched  (map: {MAP_YAML.name})")
         self._set_mode("Manual")
 
@@ -850,7 +1243,10 @@ class TeachNavGUI:
         self._log("INFO", "TELEOP", "Joystick teleop launched")
 
     def _stop_navigation(self) -> None:
+        had_nav = self._proc_alive("nav")
         self._kill_proc("nav")
+        if had_nav:
+            self._append_nav_launch_line("\n--- navigation process exited ---\n")
         self._log("INFO", "NAV", "Navigation stopped")
         self._set_mode("Idle")
 
@@ -869,11 +1265,15 @@ class TeachNavGUI:
         else:
             cmd = ["ros2", "launch", "custom_turtlebot_nodes", "joystick_teleop.launch.py"]
             try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1,
+                tp_kwargs = dict(
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
                 )
+                if sys.platform != "win32":
+                    tp_kwargs["start_new_session"] = True
+                proc = subprocess.Popen(cmd, **tp_kwargs)
                 self._procs["teleop"] = proc
                 # Background thread reads lines and pushes them to the queue
                 threading.Thread(
@@ -905,30 +1305,220 @@ class TeachNavGUI:
     def _stop_all(self) -> None:
         if self._goal_active:
             self._cancel_navigation()
+        had_nav = self._proc_alive("nav")
         for key in list(self._procs):
             self._kill_proc(key)
+        if had_nav:
+            self._append_nav_launch_line("\n--- navigation process exited ---\n")
+        for key in list(self._tool_procs):
+            self._kill_tool_proc(key)
         self._log("WARNING", "SYSTEM", "All processes stopped")
         self._set_mode("Idle")
 
+    def _launch_navigation_streaming(self, cmd: list[str]) -> None:
+        """Run Nav2 launch with merged stdout/stderr streamed to Navigation log."""
+        try:
+            kwargs: dict = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
+                "bufsize": 1,
+                "errors": "replace",
+            }
+            if sys.platform != "win32":
+                kwargs["start_new_session"] = True
+            proc = subprocess.Popen(cmd, **kwargs)
+            self._procs["nav"] = proc
+            threading.Thread(
+                target=self._read_navigation_output,
+                args=(proc,),
+                daemon=True,
+            ).start()
+        except FileNotFoundError:
+            self._log("ERROR", "SYSTEM", f"Command not found: '{cmd[0]}' — is ROS sourced?")
+            self._append_nav_launch_line("[spawn failed] ros2 not found\n")
+
+    def _read_navigation_output(self, proc: subprocess.Popen) -> None:
+        stream = proc.stdout
+        if stream is None:
+            return
+        try:
+            for line in iter(stream.readline, ""):
+                if not line:
+                    break
+                self._q.put(("nav_log", line))
+        except (OSError, ValueError):
+            pass
+
     def _launch_proc(self, key: str, cmd: list[str]) -> None:
         try:
-            self._procs[key] = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
+            kwargs: dict = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            # Own process group → ``killpg(SIGINT)`` reaches RViz & nodes (like Ctrl+C).
+            if sys.platform != "win32":
+                kwargs["start_new_session"] = True
+            self._procs[key] = subprocess.Popen(cmd, **kwargs)
         except FileNotFoundError:
             self._log("ERROR", "SYSTEM", f"Command not found: '{cmd[0]}' — is ROS sourced?")
 
     def _kill_proc(self, key: str) -> None:
         proc = self._procs.pop(key, None)
-        if proc and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        _shutdown_ros_launch_process(proc)
 
     def _proc_alive(self, key: str) -> bool:
         return key in self._procs and self._procs[key].poll() is None
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Initialisation page — ros2 topic echo / hz (subprocess monitors)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _append_init_log(self, text: str) -> None:
+        w = getattr(self, "_init_log_text", None)
+        if w is None:
+            return
+        w.config(state="normal")
+        w.insert("end", text)
+        w.see("end")
+        w.config(state="disabled")
+
+    def _kill_tool_proc(self, key: str) -> None:
+        proc = self._tool_procs.pop(key, None)
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        short = self._init_tool_short.get(key, key.split(":", 1)[-1])
+        btn = self._init_tool_btns.get(key)
+        if btn is not None:
+            btn.config(text=f"  {short}  □", bg=C["surface1"], fg=C["subtext"])
+
+    def _tool_proc_alive(self, key: str) -> bool:
+        p = self._tool_procs.get(key)
+        return p is not None and p.poll() is None
+
+    def _read_tool_output(self, key: str, proc: subprocess.Popen) -> None:
+        stream = proc.stdout
+        if stream is None:
+            return
+        try:
+            for line in iter(stream.readline, ""):
+                if not line:
+                    break
+                self._q.put(("init_log", line))
+        except (OSError, ValueError):
+            pass
+        # Process ended — refresh button state on main thread
+        self.root.after(
+            0, lambda k=key: self._on_tool_proc_ended(k),
+        )
+
+    def _on_tool_proc_ended(self, key: str) -> None:
+        if key in self._tool_procs:
+            p = self._tool_procs.get(key)
+            if p is not None and p.poll() is not None:
+                self._tool_procs.pop(key, None)
+        btn = self._init_tool_btns.get(key)
+        if btn is not None:
+            short = self._init_tool_short.get(key, key.split(":", 1)[-1])
+            btn.config(text=f"  {short}  □", bg=C["surface1"], fg=C["subtext"])
+
+    def _start_tool_stream(self, key: str, cmd: list[str], header: str) -> bool:
+        if self._tool_proc_alive(key):
+            return True
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(WORKSPACE_ROOT),
+                env=os.environ.copy(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                errors="replace",
+            )
+        except FileNotFoundError:
+            self._append_init_log(f"[error] '{cmd[0]}' not found — source ROS?\n")
+            self._log("ERROR", "SYSTEM", f"{cmd[0]} not found — is ROS sourced?")
+            return False
+        self._tool_procs[key] = proc
+        self._q.put(("init_log", header))
+        threading.Thread(
+            target=self._read_tool_output, args=(key, proc), daemon=True
+        ).start()
+        btn = self._init_tool_btns.get(key)
+        if btn is not None:
+            short = self._init_tool_short.get(key, key.split(":", 1)[-1])
+            btn.config(text=f"  {short}  ■", bg=C["teal"], fg=C["base"])
+        return True
+
+    def _toggle_topic_echo(self, topic: str) -> None:
+        key = f"echo:{topic}"
+        if self._tool_proc_alive(key):
+            self._kill_tool_proc(key)
+            self._append_init_log(f"--- stopped: ros2 topic echo {topic} ---\n")
+            return
+        ok = self._start_tool_stream(
+            key,
+            ["ros2", "topic", "echo", topic],
+            f"\n--- ros2 topic echo {topic} ---\n",
+        )
+        if not ok:
+            self._kill_tool_proc(key)
+
+    def _toggle_topic_hz_amcl(self) -> None:
+        key = "hz:/amcl_pose"
+        if self._tool_proc_alive(key):
+            self._kill_tool_proc(key)
+            self._append_init_log("--- stopped: ros2 topic hz /amcl_pose ---\n")
+            return
+        ok = self._start_tool_stream(
+            key,
+            ["ros2", "topic", "hz", "/amcl_pose"],
+            "\n--- ros2 topic hz /amcl_pose ---\n",
+        )
+        if not ok:
+            self._kill_tool_proc(key)
+
+    def _stop_all_init_monitors(self) -> None:
+        for key in list(self._tool_procs):
+            self._kill_tool_proc(key)
+        self._append_init_log("--- all CLI monitors stopped ---\n")
+
+    def _run_ros_node_list(self) -> None:
+        def work() -> None:
+            try:
+                r = subprocess.run(
+                    ["ros2", "node", "list"],
+                    cwd=str(WORKSPACE_ROOT),
+                    env=os.environ.copy(),
+                    capture_output=True,
+                    text=True,
+                    timeout=45,
+                    errors="replace",
+                )
+                out = (r.stdout or "") + (r.stderr or "")
+                self._q.put(("init_log", "\n--- ros2 node list ---\n" + out + "\n"))
+            except Exception as exc:
+                self._q.put(("init_log", f"\n[ros2 node list error] {exc}\n"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _emergency_zero_cmd_vel(self) -> None:
+        if ROS_AVAILABLE and self._ros_node is not None:
+            self._ros_node.publish_zero_twist()
+            self._append_init_log("[cmd_vel] published geometry_msgs/Twist zero on /cmd_vel\n")
+            self._log("WARNING", "TELEOP", "Emergency zero velocity on /cmd_vel")
+            return
+        self._append_init_log(
+            "[cmd_vel] ROS node offline — run: "
+            'ros2 topic pub /cmd_vel geometry_msgs/msg/Twist '
+            '"{linear: {x: 0.0}, angular: {z: 0.0}}" -1\n'
+        )
+        self._log("ERROR", "TELEOP", "Cannot zero /cmd_vel — ROS not connected")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Navigation control
@@ -1115,6 +1705,8 @@ class TeachNavGUI:
         now  = datetime.now().strftime("%H:%M:%S")
         line = f"[{now}][{level:<7}][{module:<8}] {message}"
         self._all_log_lines.append((level, line))
+        if self._log_panel_mode != "event":
+            return
         if self._log_filter == "all" or level in ("ERROR", "WARNING"):
             self._write_log_line(level, line + "\n")
 
@@ -1125,36 +1717,38 @@ class TeachNavGUI:
         self._log_text.config(state="disabled")
 
     def _clear_log(self) -> None:
-        self._log_text.config(state="normal")
-        self._log_text.delete("1.0", "end")
-        self._log_text.config(state="disabled")
-        self._all_log_lines.clear()
+        if self._log_panel_mode == "event":
+            self._all_log_lines.clear()
+            self._rewrite_event_display()
+        else:
+            self._nav_launch_log.clear()
+            self._rewrite_navigation_display()
 
     def _save_log(self) -> None:
-        ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = LOGS_DIR / f"session_{ts}.txt"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         LOGS_DIR.mkdir(exist_ok=True)
-        with open(path, "w") as fh:
-            for _, line in self._all_log_lines:
-                fh.write(line + "\n")
+        if self._log_panel_mode == "navigation":
+            path = LOGS_DIR / f"navigation_launch_{ts}.txt"
+            with open(path, "w") as fh:
+                fh.write("".join(self._nav_launch_log))
+        else:
+            path = LOGS_DIR / f"session_{ts}.txt"
+            with open(path, "w") as fh:
+                for _, line in self._all_log_lines:
+                    fh.write(line + "\n")
         self._log("INFO", "SYSTEM", f"Log saved → {path.name}")
 
     def _show_all_logs(self) -> None:
+        if self._log_panel_mode != "event":
+            return
         self._log_filter = "all"
-        self._log_text.config(state="normal")
-        self._log_text.delete("1.0", "end")
-        self._log_text.config(state="disabled")
-        for level, line in self._all_log_lines:
-            self._write_log_line(level, line + "\n")
+        self._rewrite_event_display()
 
     def _show_errors_only(self) -> None:
+        if self._log_panel_mode != "event":
+            return
         self._log_filter = "errors"
-        self._log_text.config(state="normal")
-        self._log_text.delete("1.0", "end")
-        self._log_text.config(state="disabled")
-        for level, line in self._all_log_lines:
-            if level in ("ERROR", "WARNING"):
-                self._write_log_line(level, line + "\n")
+        self._rewrite_event_display()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Locations file I/O
@@ -1223,6 +1817,12 @@ class TeachNavGUI:
                         text=f"x={x:+.3f}    y={y:+.3f}    yaw={yaw:+.1f}°"
                     )
 
+                elif kind == "odom_vel":
+                    _, vx, wz = msg
+                    self._odom_lbl.config(
+                        text=f"vx={vx:+.3f}    ωz={wz:+.3f}",
+                    )
+
                 elif kind == "battery":
                     pct   = msg[1]
                     text  = f"{pct:.0f}%" if pct >= 0 else "—"
@@ -1284,6 +1884,12 @@ class TeachNavGUI:
                 elif kind == "joy_log":
                     self._joy_append(msg[1])
 
+                elif kind == "nav_log":
+                    self._append_nav_launch_line(msg[1])
+
+                elif kind == "init_log":
+                    self._append_init_log(msg[1])
+
         except queue.Empty:
             pass
         self.root.after(100, self._poll_queue)
@@ -1308,6 +1914,14 @@ class TeachNavGUI:
         else:
             self._btn_joy_toggle.config(text="⏵  Enable Joystick",
                                         bg=C["green"], fg=C["base"])
+
+        # Navigation Enable/Disable — avoid double-start while stack is running
+        if self._proc_alive("nav"):
+            self._btn_nav_enable.config(state=tk.DISABLED)
+            self._btn_nav_disable.config(state=tk.NORMAL)
+        else:
+            self._btn_nav_enable.config(state=tk.NORMAL)
+            self._btn_nav_disable.config(state=tk.DISABLED)
 
         self.root.after(1500, self._poll_processes)
 
@@ -1341,12 +1955,46 @@ class TeachNavGUI:
     # ─────────────────────────────────────────────────────────────────────────
 
     def on_close(self) -> None:
-        self._stop_all()
-        if self._ros_node:
-            self._ros_node.destroy_node()
-        if ROS_AVAILABLE and rclpy.ok():
-            rclpy.shutdown()
-        self.root.destroy()
+        """WM_DELETE_WINDOW — always tear down Tk; ROS shutdown must not block the GUI thread."""
+        if getattr(self, "_closing_gui", False):
+            try:
+                self.root.destroy()
+            except tk.TclError:
+                pass
+            return
+        self._closing_gui = True
+
+        node_ref = self._ros_node
+        self._ros_node = None
+
+        try:
+            try:
+                self._stop_all()
+            except BaseException:
+                pass
+
+            def _ros_shutdown_background() -> None:
+                """Avoid deadlock: spin runs on another thread; shutdown from main can hang."""
+                try:
+                    if node_ref is not None:
+                        node_ref.destroy_node()
+                    if ROS_AVAILABLE and rclpy.ok():
+                        rclpy.shutdown()
+                except BaseException:
+                    pass
+
+            if ROS_AVAILABLE:
+                threading.Thread(target=_ros_shutdown_background, daemon=True).start()
+
+        finally:
+            try:
+                self.root.quit()
+            except tk.TclError:
+                pass
+            try:
+                self.root.destroy()
+            except tk.TclError:
+                pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
