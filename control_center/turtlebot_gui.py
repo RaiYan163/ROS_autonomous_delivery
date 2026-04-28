@@ -26,7 +26,8 @@ Panels (Turtlebot page)
   4. Saved Locations  – dropdown of stored waypoints
   5. Auto-Navigation  – send Nav2 goal, cancel, recover, update, delete
   6. Navigation — Enable/Disable stack + goal state / distance / events
-  7. Logs — Event log or Navigation log (ros2 launch stdout), toggle buttons
+  7. Camera — live preview from /image_raw/compressed
+  8. Logs — Event log or Navigation log (ros2 launch stdout), toggle buttons
 """
 
 from __future__ import annotations
@@ -50,9 +51,12 @@ from tkinter import messagebox, ttk
 # DDS domain must match TurtleBot PC and every terminal that should share topics.
 # ─────────────────────────────────────────────────────────────────────────────
 
-ROS_DOMAIN_ID      = 25                      # int 0–232 typically
+ROS_DOMAIN_ID      = 23                      # match TurtleBot3 PC / bashrc (0–232)
 TURTLEBOT3_MODEL   = "burger"
 RMW_IMPLEMENTATION = "rmw_fastrtps_cpp"
+
+# Compressed image topic for the dashboard preview (image_transport default suffix).
+CAMERA_COMPRESSED_TOPIC = "/image_raw/compressed"
 
 os.environ["ROS_DOMAIN_ID"]        = str(ROS_DOMAIN_ID)
 os.environ["TURTLEBOT3_MODEL"]     = TURTLEBOT3_MODEL
@@ -179,10 +183,19 @@ try:
     from nav_msgs.msg import Odometry
     from rclpy.action import ActionClient
     from rclpy.node import Node
-    from sensor_msgs.msg import BatteryState, Joy
+    from sensor_msgs.msg import BatteryState, CompressedImage, Joy
     ROS_AVAILABLE = True
 except ImportError:
     pass
+
+CV2_NUMPY_AVAILABLE = False
+try:
+    import cv2
+    import numpy as np
+    CV2_NUMPY_AVAILABLE = True
+except ImportError:
+    cv2 = None  # type: ignore[assignment]
+    np = None  # type: ignore[assignment]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -194,6 +207,7 @@ if ROS_AVAILABLE:
         Lightweight ROS2 node.
         • Subscribes to /amcl_pose  → pushes ("pose", x, y, yaw_deg)
         • Subscribes to /battery_state → pushes ("battery", pct)
+        • Subscribes to CAMERA_COMPRESSED_TOPIC → pushes ("camera_frame", ppm_bytes)
         • Provides send_goal() / cancel_goal() for NavigateToPose
         All feedback and results are forwarded to gui_queue so only the
         main thread touches tkinter widgets.
@@ -221,6 +235,28 @@ if ROS_AVAILABLE:
             )
             self._cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
             self._last_odom_push_ns = 0
+            self._last_camera_push_ns = 0
+            self._camera_decode_warned = False
+
+            if CV2_NUMPY_AVAILABLE:
+                self.create_subscription(
+                    CompressedImage,
+                    CAMERA_COMPRESSED_TOPIC,
+                    self._on_camera_compressed,
+                    10,
+                )
+            else:
+                self.get_logger().warning(
+                    "OpenCV/NumPy not available — camera preview disabled"
+                )
+                self._q.put(
+                    (
+                        "log",
+                        "WARNING",
+                        "CAMERA",
+                        "OpenCV/NumPy missing — camera preview disabled",
+                    )
+                )
 
             # Periodic check: if no /joy message arrives for 2 s → disconnected
             self.create_timer(1.0, self._check_joy_timeout)
@@ -358,6 +394,45 @@ if ROS_AVAILABLE:
             wz = msg.twist.twist.angular.z
             self._q.put(("odom_vel", vx, wz))
 
+        def _on_camera_compressed(self, msg: CompressedImage) -> None:
+            """Decode compressed image, downscale, push PPM bytes for Tk PhotoImage."""
+            if not CV2_NUMPY_AVAILABLE or cv2 is None or np is None:
+                return
+            ns = self.get_clock().now().nanoseconds
+            if ns - self._last_camera_push_ns < 100_000_000:  # ≤10 Hz to GUI
+                return
+            self._last_camera_push_ns = ns
+
+            arr = np.frombuffer(msg.data, dtype=np.uint8)
+            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if bgr is None:
+                if not self._camera_decode_warned:
+                    self._camera_decode_warned = True
+                    self._q.put(
+                        (
+                            "log",
+                            "WARNING",
+                            "CAMERA",
+                            f"imdecode failed (format={msg.format!r})",
+                        )
+                    )
+                return
+
+            h, w = bgr.shape[:2]
+            max_w = 480
+            if w > max_w:
+                scale = max_w / float(w)
+                bgr = cv2.resize(
+                    bgr,
+                    (int(w * scale), int(h * scale)),
+                    interpolation=cv2.INTER_AREA,
+                )
+
+            ok, buf = cv2.imencode(".ppm", bgr)
+            if not ok or buf is None:
+                return
+            self._q.put(("camera_frame", buf.tobytes()))
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Reusable styled widget helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -477,6 +552,7 @@ class TeachNavGUI:
         self._init_tool_btns: dict[str, tk.Button] = {}
         self._init_tool_short: dict[str, str] = {}
         self._closing_gui = False
+        self._camera_photo_ref: tk.PhotoImage | None = None
         self._setup_window()
         self._load_locations()
         self._build_nav_and_pages()
@@ -775,12 +851,14 @@ class TeachNavGUI:
         right_pane = tk.Frame(body, bg=C["base"])
         right_pane.grid(row=0, column=1, rowspan=7, sticky="nsew", **PAD)
         right_pane.columnconfigure(0, weight=1)
-        # Nav strip always readable; log row takes all remaining height.
+        # Nav + camera fixed height; log absorbs remaining vertical space.
         right_pane.rowconfigure(0, weight=0, minsize=120)
-        right_pane.rowconfigure(1, weight=1, minsize=320)
+        right_pane.rowconfigure(1, weight=0, minsize=260)
+        right_pane.rowconfigure(2, weight=1, minsize=280)
 
         self._build_navstatus_panel(right_pane).grid(row=0, column=0, sticky="nsew")
-        self._build_log_panel(right_pane)      .grid(row=1, column=0, sticky="nsew")
+        self._build_camera_panel(right_pane)   .grid(row=1, column=0, sticky="nsew")
+        self._build_log_panel(right_pane)      .grid(row=2, column=0, sticky="nsew")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Panel 1 — System Control
@@ -1054,6 +1132,50 @@ class TeachNavGUI:
         self._nav_state_lbl     = nav_field(row_a, "Goal State:")
         self._nav_dist_lbl      = nav_field(row_b, "Distance:")
         self._nav_event_lbl     = nav_field(row_b, "Last Event:")
+
+        return outer
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Panel — Camera (compressed image stream)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_camera_panel(self, parent: tk.Widget) -> tk.Frame:
+        outer, inner = make_panel(parent, "📷  Camera")
+
+        tk.Label(
+            inner,
+            text=CAMERA_COMPRESSED_TOPIC,
+            font=FONT_SMALL,
+            bg=C["surface0"],
+            fg=C["subtext"],
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
+
+        cam_wrap = tk.Frame(inner, bg=C["mantle"], highlightthickness=1,
+                            highlightbackground=C["surface1"])
+        cam_wrap.pack(fill="both", expand=True)
+
+        waiting = (
+            "Waiting for stream…"
+            if ROS_AVAILABLE
+            else "ROS unavailable — source workspace and restart"
+        )
+        if ROS_AVAILABLE and not CV2_NUMPY_AVAILABLE:
+            waiting = "OpenCV/NumPy missing — install requirements.txt"
+
+        self._camera_image_lbl = tk.Label(
+            cam_wrap,
+            text=waiting,
+            font=FONT_BODY,
+            bg=C["mantle"],
+            fg=C["subtext"],
+            anchor="center",
+            justify="center",
+            wraplength=440,
+            padx=8,
+            pady=24,
+        )
+        self._camera_image_lbl.pack(fill="both", expand=True)
 
         return outer
 
@@ -1890,6 +2012,15 @@ class TeachNavGUI:
                 elif kind == "init_log":
                     self._append_init_log(msg[1])
 
+                elif kind == "camera_frame":
+                    ppm_bytes = msg[1]
+                    try:
+                        photo = tk.PhotoImage(data=ppm_bytes)
+                        self._camera_photo_ref = photo
+                        self._camera_image_lbl.config(image=photo, text="")
+                    except tk.TclError:
+                        pass
+
         except queue.Empty:
             pass
         self.root.after(100, self._poll_queue)
@@ -1944,8 +2075,11 @@ class TeachNavGUI:
             self._ros_thread.start()
             self._ros_badge.config(text="  ROS: Connected  ",
                                    bg=C["green"], fg=C["crust"])
-            self._log("INFO", "ROS",
-                      "Node started — subscribed to /amcl_pose, /battery_state")
+            self._log(
+                "INFO",
+                "ROS",
+                f"Node started — /amcl_pose, /battery_state, {CAMERA_COMPRESSED_TOPIC}",
+            )
         except Exception as exc:
             self._ros_badge.config(text="  ROS: Error  ", bg=C["red"])
             self._log("ERROR", "ROS", f"Failed to initialise ROS node: {exc}")
