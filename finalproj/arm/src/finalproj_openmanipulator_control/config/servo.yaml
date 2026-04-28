@@ -1,0 +1,40 @@
+servo_node:
+  ros__parameters:
+    moveit_servo:
+      publish_period: 0.01
+      max_expected_latency: 0.1
+
+      command_in_type: "speed_units"
+      scale:
+        linear: 0.2
+        rotational: 0.8
+        joint: 1.0
+
+      command_out_type: "trajectory_msgs/JointTrajectory"
+      command_out_topic: "/arm_controller/joint_trajectory"
+      publish_joint_positions: true
+      publish_joint_velocities: false
+      publish_joint_accelerations: false
+
+      use_smoothing: true
+      smoothing_filter_plugin_name: "online_signal_smoothing::ButterworthFilterPlugin"
+
+      is_primary_planning_scene_monitor: false
+      monitored_planning_scene_topic: "/monitored_planning_scene"
+      check_octomap_collisions: false
+      check_collisions: false
+
+      move_group_name: "arm"
+      cartesian_command_in_topic: "~/delta_twist_cmds"
+      joint_command_in_topic: "~/delta_joint_cmds"
+      joint_topic: "/joint_states"
+      status_topic: "~/status"
+
+      lower_singularity_threshold: 10.0
+      hard_stop_singularity_threshold: 30.0
+      leaving_singularity_threshold_multiplier: 2.0
+      joint_limit_margins: [0.1]
+
+      collision_check_rate: 10.0
+      self_collision_proximity_threshold: 0.01
+      scene_collision_proximity_threshold: 0.02

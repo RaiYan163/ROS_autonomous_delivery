@@ -1,0 +1,50 @@
+finalproj_joy_controller:
+  ros__parameters:
+    arm_joints: ["joint1", "joint2", "joint3", "joint4"]
+    gripper_joints: ["gripper_left_joint", "gripper_right_joint_mimic"]
+
+    axis_to_joint: [0, 1, 2, 3]
+    dpad_horizontal_axis: 4
+    dpad_vertical_axis: 5
+    deadzone: 0.18
+    joint_velocity_scale: 0.30
+    direct_publish_rate: 50.0
+    motion_point_duration: 2.0
+
+    base_frame: "world"
+    ee_link: "end_effector_link"
+    move_group_name: "arm"
+    ik_link_name: "end_effector_link"
+
+    joint_jog_topic: "/servo_node/delta_joint_cmds"
+    trajectory_action_name: "/arm_controller/follow_joint_trajectory"
+    gripper_action_name: "/gripper_controller/gripper_cmd"
+    gripper_open_position: 0.020
+    gripper_closed_position: -0.010
+    gripper_motion_tolerance: 0.002
+    gripper_settle_sec: 0.45
+    auto_start_servo: true
+
+    world_name: "default"
+    cube_name: "finalproj_cube"
+    cube_x: 0.22
+    cube_y: 0.0
+    cube_z: 0.020
+    pick_pregrasp_z: 0.13
+    pick_grasp_z: 0.035
+
+    recording_file: "~/.ros/finalproj_openmanipulator_recordings.json"
+
+    button_close_gripper: 0
+    button_open_gripper: 1
+    button_record_joint: 2
+    button_record_ee: 3
+    button_play_joint_pose: 4
+    button_toggle_pick_task: 5
+    button_save_motion: 6
+    button_play_all_motions: 7
+    button_toggle_dance: 8
+    button_play_joint_motion: 9
+    button_play_ee_pose: 10
+    button_play_ee_sequence: 11
+    button_print_status: 12
