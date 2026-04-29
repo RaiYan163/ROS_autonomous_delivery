@@ -12,7 +12,7 @@ from typing import Optional
 import rclpy
 from builtin_interfaces.msg import Duration as DurationMsg
 from control_msgs.action import FollowJointTrajectory
-from control_msgs.action import ParallelGripperCommand
+from control_msgs.action import GripperCommand
 from control_msgs.msg import JointJog
 from geometry_msgs.msg import Pose
 from geometry_msgs.msg import PoseStamped
@@ -201,7 +201,7 @@ class FinalProjJoyController(Node):
         )
         self.gripper_client = ActionClient(
             self,
-            ParallelGripperCommand,
+            GripperCommand,
             self.gripper_action_name,
         )
         self.ik_client = (
@@ -735,11 +735,9 @@ class FinalProjJoyController(Node):
         start_position = self.current_gripper_position()
         closing_motion = start_position is None or float(position) < start_position
 
-        goal_msg = ParallelGripperCommand.Goal()
-        goal_msg.command.name = [self.gripper_joints[0]]
-        goal_msg.command.position = [float(position)]
-        goal_msg.command.velocity = []
-        goal_msg.command.effort = [100.0]
+        goal_msg = GripperCommand.Goal()
+        goal_msg.command.position = float(position)
+        goal_msg.command.max_effort = 10.0
 
         send_future = self.gripper_client.send_goal_async(goal_msg)
         if not self.wait_future(send_future, 3.0):
@@ -787,11 +785,9 @@ class FinalProjJoyController(Node):
             )
             return False
 
-        goal_msg = ParallelGripperCommand.Goal()
-        goal_msg.command.name = [self.gripper_joints[0]]
-        goal_msg.command.position = [float(position)]
-        goal_msg.command.velocity = []
-        goal_msg.command.effort = [100.0]
+        goal_msg = GripperCommand.Goal()
+        goal_msg.command.position = float(position)
+        goal_msg.command.max_effort = 10.0
         self.gripper_client.send_goal_async(goal_msg)
         return True
 

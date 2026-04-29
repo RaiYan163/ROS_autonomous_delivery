@@ -47,11 +47,12 @@ names (`open_manipulator_*`) or the older Humble names
 ## Final Project Package
 
 The custom final-project package in `src/finalproj_openmanipulator_control/`
-is still set up around the existing Humble-era workflow:
+uses ROS 2 Jazzy in this workspace:
 
 ```bash
 cd /home/mkros/robotics/finalproj/arm
-./build-humble.sh
+./setup-openmanipulator-teleop.sh
+./build-jazzy.sh
 source install/setup.bash
 ```
 
@@ -67,3 +68,65 @@ Or with OpenCR:
 ros2 launch finalproj_openmanipulator_control system.launch.py \
   hardware_port_name:=/dev/ttyACM0
 ```
+
+## Two-PC SSH Setup
+
+Use this when the OpenManipulator-X is plugged into a remote PC, but the
+joystick/teleop input stays on this local machine.
+
+Both PCs must be on the same network and use the same ROS domain. This project
+defaults the helper scripts to `ROS_DOMAIN_ID=30`, matching the local machine.
+If you change it, change it on both PCs:
+
+```bash
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+```
+
+On the remote PC, clone or copy this workspace, build it, and start only the
+arm-side nodes:
+
+```bash
+ssh USER@REMOTE_PC
+cd /home/mkros/robotics/finalproj/arm
+sudo apt-get update
+sudo apt-get install -y ros-jazzy-moveit-servo
+./setup-openmanipulator-teleop.sh
+./build-jazzy.sh
+./run-finalproj-remote-arm.sh
+```
+
+If the remote PC uses OpenCR instead of U2D2:
+
+```bash
+./run-finalproj-remote-arm.sh hardware_port_name:=/dev/ttyACM0
+```
+
+On this local PC, start only the joystick/controller side:
+
+```bash
+cd /home/mkros/robotics/finalproj/arm
+./run-finalproj-local-teleop.sh
+```
+
+For the official ROBOTIS keyboard teleop instead of the final-project joystick
+controller, run this locally after the remote hardware launch is up:
+
+```bash
+cd /home/mkros/robotics/finalproj/arm
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+./run-openmanipulator-teleop.sh
+```
+
+Quick checks:
+
+```bash
+ros2 node list
+ros2 topic echo /joint_states
+ros2 topic echo /joy
+```
+
+If the machines cannot see each other, verify they are on the same Wi-Fi or
+Ethernet network, neither shell has `ROS_LOCALHOST_ONLY=1`, and firewalls are
+not blocking ROS 2 DDS discovery traffic.
