@@ -6,3 +6,9 @@ finalproj/arm/build/
 finalproj/arm/install/
 finalproj/arm/log/
 finalproj/arm/tools/DynamixelWizard2/
+
+# Local / collaborator analysis (not tracked)
+docs/MCP_IMPLEMENTATION_ANALYSIS.txt
+
+# MCP client sliding-window memory (session / debug; do not commit)
+memory_context.txt

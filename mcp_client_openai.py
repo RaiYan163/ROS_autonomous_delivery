@@ -13,18 +13,22 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from openai import OpenAI
 from dotenv import load_dotenv
 
+from mcp_memory_context import FILE_NAME, MemoryContext
+
 load_dotenv()
 
 
 class MCPWrapper:
     """Routes user text through OpenAI and optionally calls MCP tools."""
 
-    def __init__(self, session: ClientSession) -> None:
+    def __init__(self, session: ClientSession, memory_path: Path) -> None:
         self.session = session
         self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
         self.model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+        self.memory = MemoryContext(memory_path)
 
     def _llm_route(self, user_input: str) -> str:
+        context_block = self.memory.build_router_context(user_input)
         prompt = f"""
 You are a routing assistant for an MCP server connected to ROS2 TurtleBot simulation.
 
@@ -57,6 +61,10 @@ For navigation:
 - Use CALL get_navigation_state for status: "navigation status", "where is the goal", "what did I set".
 If they give explicit map coordinates, fill x y yaw_deg from their message; if yaw omitted use yaw_deg=0 for goals.
 
+Use RECENT HISTORY and ROBOT STATE below to interpret follow-ups ("again", "repeat that", "same as before",
+"go to previous goal", "what happened?", "continue"). You must still output only one CALL/NO TOOL line.
+Route the intent of the single user message shown under NEW USER QUERY at the bottom of the context block.
+
 Line templates:
 - CALL publish_message text=<message>
 - CALL get_camera_snapshot
@@ -70,7 +78,8 @@ Line templates:
 - CALL set_navigation_goal x=<number> y=<number> yaw_deg=<number>
 - NO TOOL NEEDED <brief reply>
 
-USER: {user_input}
+--- CONTEXT (sliding window + robot state) ---
+{context_block}
 """.strip()
 
         response = self.client.responses.create(
@@ -169,13 +178,8 @@ USER: {user_input}
         )
         return self._extract_result_text(result)
 
-    async def handle(self, user_input: str) -> str:
-        command = self._llm_route(user_input)
-        if command.startswith("CALL get_navigation_help") and self._wants_execute_navigation(
-            user_input
-        ):
-            command = "CALL execute_navigation"
-
+    async def _execute_command(self, command: str, user_input: str) -> str:
+        """Run MCP tools for a parsed CALL line (or handle NO TOOL / fallbacks)."""
         if command.startswith("CALL publish_message"):
             match = re.search(r"text=(.*)$", command)
             if not match:
@@ -263,13 +267,27 @@ USER: {user_input}
         if command.startswith("NO TOOL NEEDED"):
             return command.replace("NO TOOL NEEDED", "", 1).strip()
 
-        # LLM returned invalid line — try motion parsing from raw user text
         parsed = self._parse_teleop_from_user_text(user_input)
         if parsed:
             direction, duration = parsed
             return await self._do_teleop(direction, duration)
 
         return f"Unrecognized router output: {command}"
+
+    async def handle(self, user_input: str) -> str:
+        self.memory.load()
+        command = self._llm_route(user_input)
+        if command.startswith("CALL get_navigation_help") and self._wants_execute_navigation(
+            user_input
+        ):
+            command = "CALL execute_navigation"
+
+        reply = await self._execute_command(command, user_input)
+
+        self.memory.append_exchange(user_input, reply)
+        self.memory.update_robot_state(command, reply)
+        self.memory.save()
+        return reply
 
 
 def _project_root() -> Path:
@@ -282,6 +300,7 @@ async def chat_loop() -> None:
     if not server_py.is_file():
         raise RuntimeError(f"MCP server not found at {server_py}")
 
+    memory_path = root / FILE_NAME
     server_params = StdioServerParameters(
         command=sys.executable,
         args=[str(server_py)],
@@ -292,10 +311,11 @@ async def chat_loop() -> None:
     async with stdio_client(server_params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
-            wrapper = MCPWrapper(session)
+            wrapper = MCPWrapper(session, memory_path)
 
             print("OpenAI MCP client ready. Type 'exit' to quit.")
             print("Try: drive forward for 3 seconds | turn left 2s | stop the robot")
+            print(f"Sliding-window memory + robot state: {memory_path}")
             while True:
                 user_input = input("You: ").strip()
                 if user_input.lower() in {"exit", "quit"}:
