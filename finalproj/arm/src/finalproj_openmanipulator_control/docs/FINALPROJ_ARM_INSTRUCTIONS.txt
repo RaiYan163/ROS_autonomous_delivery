@@ -1,0 +1,28 @@
+Final Project Hardware OpenManipulator-X Controller
+===================================================
+
+This package ports the HW11 virtual-arm behaviors onto the real
+OpenManipulator-X stack:
+
+- joystick joint jogging through MoveIt Servo
+- gripper open/close
+- joint pose recording and replay
+- multi-point motion recording and replay
+- end-effector pose recording through tf2
+- end-effector replay through MoveIt IK
+- random dance behavior
+- autonomous pick-rotate-drop motion using fixed workspace coordinates
+
+Recommended launch:
+
+  ros2 launch finalproj_openmanipulator_control system.launch.py
+
+If using OpenCR:
+
+  ros2 launch finalproj_openmanipulator_control system.launch.py \
+    hardware_port_name:=/dev/ttyACM0
+
+The hardware bringup defaults match ROBOTIS's ROS 2 launch flow:
+
+  ros2 launch open_manipulator_bringup open_manipulator_x.launch.py
+  ros2 launch open_manipulator_moveit_config open_manipulator_x_moveit.launch.py

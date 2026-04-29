@@ -1,2 +1,8 @@
 .env
 previous_mcp_template/
+
+finalproj/arm/src/robotis/
+finalproj/arm/build/
+finalproj/arm/install/
+finalproj/arm/log/
+finalproj/arm/tools/DynamixelWizard2/
