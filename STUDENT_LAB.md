@@ -6,8 +6,8 @@ This document is for **students**. Your teacher’s MCP server lets an assistant
 
 | File | Role |
 |------|------|
-| `mcp_server_ros2.py` | MCP server: defines all tools and the ROS node that connects to topics. |
-| `mcp_client_openai.py` | Demo client: you type English; it calls the right tools. It **starts** the server for you. |
+| `mcp_server/mcp_server_ros2.py` | MCP server: defines all tools and the ROS node that connects to topics. |
+| `mcp_server/mcp_client_openai.py` | Demo client: you type English; it calls the right tools. It **starts** the server for you. |
 | `requirements.txt` | Python packages to install with pip (in a venv). |
 | `mcp_ros2_turtlebot_notes.txt` | Extra reference (topics, troubleshooting, SLAM). |
 
@@ -16,10 +16,10 @@ This document is for **students**. Your teacher’s MCP server lets an assistant
 ## Big picture
 
 1. **Gazebo** runs the TurtleBot3 world and the virtual robot.
-2. **`mcp_client_openai.py`** starts **`mcp_server_ros2.py`** in the background and sends it MCP tool requests over stdio.
+2. **`mcp_server/mcp_client_openai.py`** (run as `python3 -m mcp_server.mcp_client_openai`) starts **`mcp_server/mcp_server_ros2.py`** in the background and sends it MCP tool requests over stdio.
 3. The **server** uses **rclpy** to publish/subscribe on the same topics as any other ROS 2 node.
 
-You do **not** need to run `mcp_server_ros2.py` in a second terminal for this lab—the client launches it automatically.
+You do **not** need to run `mcp_server/mcp_server_ros2.py` in a second terminal for this lab—the client launches it automatically.
 
 ---
 
@@ -168,13 +168,13 @@ Wait until the robot appears in Gazebo.
 Use the **same** `TURTLEBOT3_MODEL` and **source ROS + install** again:
 
 ```bash
-cd ~/Desktop/mcp_approach && source /opt/ros/jazzy/setup.bash && source install/setup.bash && export TURTLEBOT3_MODEL=waffle_pi && export MCP_USE_SIM_TIME=1 && { [ ! -f .venv/bin/activate ] || . .venv/bin/activate; } && python3 mcp_client_openai.py
+cd ~/Desktop/mcp_approach && source /opt/ros/jazzy/setup.bash && source install/setup.bash && export TURTLEBOT3_MODEL=waffle_pi && export MCP_USE_SIM_TIME=1 && { [ ! -f .venv/bin/activate ] || . .venv/bin/activate; } && python3 -m mcp_server.mcp_client_openai
 ```
 
 If you do **not** use a venv, use this line instead:
 
 ```bash
-cd ~/Desktop/mcp_approach && source /opt/ros/jazzy/setup.bash && source install/setup.bash && export TURTLEBOT3_MODEL=waffle_pi && export MCP_USE_SIM_TIME=1 && python3 mcp_client_openai.py
+cd ~/Desktop/mcp_approach && source /opt/ros/jazzy/setup.bash && source install/setup.bash && export TURTLEBOT3_MODEL=waffle_pi && export MCP_USE_SIM_TIME=1 && python3 -m mcp_server.mcp_client_openai
 ```
 
 You should see something like **OpenAI MCP client ready**. Type at the `You:` prompt. Type `exit` or `quit` to leave.
@@ -255,7 +255,7 @@ Nav2 must be running and the `NavigateToPose` action must be available before `e
 | Problem | What to check |
 |---------|----------------|
 | `OPENAI_API_KEY is not set` | `.env` in repo root with a valid key. |
-| `No module named 'rclpy'` | Sourced `/opt/ros/jazzy/setup.bash` and `install/setup.bash` before `python3 mcp_client_openai.py`. |
+| `No module named 'rclpy'` | Sourced `/opt/ros/jazzy/setup.bash` and `install/setup.bash` before `python3 -m mcp_server.mcp_client_openai`. |
 | Robot does not move | `MCP_USE_SIM_TIME=1` with Gazebo; model matches Gazebo terminal. |
 | No camera / snapshot fails | `TURTLEBOT3_MODEL=waffle_pi`; `ros2 topic hz /camera/image_raw`. |
 | Nav2 / map looks wrong in sim | Launches use `use_sim_time:=true` where your teacher’s guide says so. |

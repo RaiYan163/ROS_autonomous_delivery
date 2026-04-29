@@ -17,7 +17,7 @@ Pages
   Turtlebot — main dashboard (panels below).
   Initialisation — map path, ROS CLI diagnostics (topic echo/hz/node list),
                     launch shortcuts, emergency zero cmd_vel.
-  AI assistant — separate Toplevel: chat, MCP-style tool catalogue, tool call log (LLM later).
+  AI assistant — separate Toplevel: chat, MCP tool catalogue, tool log; optional OpenAI+MCP (mcp_server/).
 
 Panels (Turtlebot page)
 --------
@@ -71,6 +71,16 @@ WORKSPACE_ROOT = SCRIPT_DIR.parent
 LOCATIONS_FILE = SCRIPT_DIR / "config" / "saved_locations.json"
 LOGS_DIR       = SCRIPT_DIR / "logs"
 MAP_YAML       = WORKSPACE_ROOT / "real_map" / "test_map.yaml"
+
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(WORKSPACE_ROOT / ".env")
+except ImportError:
+    pass
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Subprocess teardown for ``ros2 launch`` (whole tree incl. RViz)
@@ -172,7 +182,7 @@ GOAL_STATE_NAMES = {
     3: "Canceling", 4: "Succeeded", 5: "Canceled", 6: "Aborted",
 }
 
-# AI assistant panel: mirrors mcp_server_ros2.py tool names (descriptions for UI only until wired).
+# AI assistant panel: mirrors mcp_server/mcp_server_ros2.py tool names.
 AI_ASSISTANT_TOOL_CATALOG: list[tuple[str, str]] = [
     ("publish_message", "Publish a demo std_msgs/String to /chatter."),
     ("get_status", "Lightweight ROS graph / topic sanity string."),
@@ -199,7 +209,7 @@ ROS_AVAILABLE = False
 try:
     import rclpy
     from action_msgs.msg import GoalStatus
-    from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+    from geometry_msgs.msg import PoseWithCovarianceStamped, Twist, TwistStamped
     from nav2_msgs.action import NavigateToPose
     from nav_msgs.msg import Odometry
     from rclpy.action import ActionClient
@@ -230,6 +240,9 @@ if ROS_AVAILABLE:
         • Subscribes to /battery_state → pushes ("battery", pct)
         • Subscribes to CAMERA_COMPRESSED_TOPIC → pushes ("camera_frame", ppm_bytes)
         • Provides send_goal() / cancel_goal() for NavigateToPose
+        • cmd_vel: parameters `cmd_vel_topic` (default /cmd_vel) and `cmd_vel_type`
+          (default twist_stamped) align with mcp_server/mcp_server_ros2.py and
+          turtlebot3_gazebo; set cmd_vel_type:=twist for plain Twist subscribers.
         All feedback and results are forwarded to gui_queue so only the
         main thread touches tkinter widgets.
         """
@@ -239,6 +252,18 @@ if ROS_AVAILABLE:
             self._q = gui_queue
             self._goal_handle = None
             self._last_joy_ns: float = 0.0
+
+            self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+            self.declare_parameter("cmd_vel_type", "twist_stamped")
+            cmd_topic = str(self.get_parameter("cmd_vel_topic").value)
+            cmd_type = str(self.get_parameter("cmd_vel_type").value).strip().lower()
+            if cmd_type not in ("twist", "twist_stamped"):
+                self.get_logger().warning(
+                    "Invalid cmd_vel_type %r; using twist_stamped (matches MCP server / Gazebo)."
+                    % (cmd_type,)
+                )
+                cmd_type = "twist_stamped"
+            self._cmd_vel_type = cmd_type
 
             self._action_client = ActionClient(self, NavigateToPose, "/navigate_to_pose")
 
@@ -254,7 +279,12 @@ if ROS_AVAILABLE:
             self.create_subscription(
                 Odometry, "/odom", self._on_odom, 10
             )
-            self._cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
+            if self._cmd_vel_type == "twist_stamped":
+                self._cmd_vel_pub = self.create_publisher(TwistStamped, cmd_topic, 10)
+                self._cmd_vel_log_label = f"geometry_msgs/msg/TwistStamped on {cmd_topic}"
+            else:
+                self._cmd_vel_pub = self.create_publisher(Twist, cmd_topic, 10)
+                self._cmd_vel_log_label = f"geometry_msgs/msg/Twist on {cmd_topic}"
             self._last_odom_push_ns = 0
             self._last_camera_push_ns = 0
             self._camera_decode_warned = False
@@ -403,8 +433,14 @@ if ROS_AVAILABLE:
         # ── Odometry (throttled) + zero cmd_vel ────────────────────────────────
 
         def publish_zero_twist(self) -> None:
-            """Emergency stop: publish zero Twist on /cmd_vel."""
-            self._cmd_vel_pub.publish(Twist())
+            """Emergency stop: publish zero velocity on cmd_vel (Twist or TwistStamped)."""
+            if self._cmd_vel_type == "twist_stamped":
+                z = TwistStamped()
+                z.header.frame_id = "base_link"
+                z.header.stamp = self.get_clock().now().to_msg()
+                self._cmd_vel_pub.publish(z)
+            else:
+                self._cmd_vel_pub.publish(Twist())
 
         def _on_odom(self, msg: Odometry) -> None:
             ns = self.get_clock().now().nanoseconds
@@ -581,6 +617,10 @@ class TeachNavGUI:
         self._ai_tool_list: tk.Listbox | None = None
         self._ai_tool_desc_lbl: tk.Label | None = None
         self._ai_input_entry: tk.Entry | None = None
+        self._mcp_thread: threading.Thread | None = None
+        self._mcp_user_q: queue.Queue | None = None
+        self._mcp_tk_q: queue.Queue | None = None
+        self._mcp_stop: threading.Event | None = None
         self._setup_window()
         self._load_locations()
         self._build_nav_and_pages()
@@ -1677,12 +1717,16 @@ class TeachNavGUI:
     def _emergency_zero_cmd_vel(self) -> None:
         if ROS_AVAILABLE and self._ros_node is not None:
             self._ros_node.publish_zero_twist()
-            self._append_init_log("[cmd_vel] published geometry_msgs/Twist zero on /cmd_vel\n")
+            self._append_init_log(
+                f"[cmd_vel] published zero ({self._ros_node._cmd_vel_log_label})\n"
+            )
             self._log("WARNING", "TELEOP", "Emergency zero velocity on /cmd_vel")
             return
         self._append_init_log(
-            "[cmd_vel] ROS node offline — run: "
-            'ros2 topic pub /cmd_vel geometry_msgs/msg/Twist '
+            "[cmd_vel] ROS node offline — examples:\n"
+            "  ros2 topic pub /cmd_vel geometry_msgs/msg/TwistStamped "
+            '"{header: {frame_id: base_link}, twist: {linear: {x: 0.0}, angular: {z: 0.0}}}" -1\n'
+            "  ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "
             '"{linear: {x: 0.0}, angular: {z: 0.0}}" -1\n'
         )
         self._log("ERROR", "TELEOP", "Cannot zero /cmd_vel — ROS not connected")
@@ -2133,7 +2177,85 @@ class TeachNavGUI:
     # AI assistant (separate Toplevel — chat + tools + tool log)
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _stop_ai_mcp_worker(self) -> None:
+        th = self._mcp_thread
+        uq = self._mcp_user_q
+        st = self._mcp_stop
+        self._mcp_thread = None
+        self._mcp_user_q = None
+        self._mcp_tk_q = None
+        self._mcp_stop = None
+        if st is not None and uq is not None:
+            try:
+                from mcp_server.tk_worker import stop_mcp_worker
+
+                stop_mcp_worker(st, uq, th)
+            except BaseException:
+                pass
+
+    def _start_ai_mcp_worker(self) -> None:
+        if self._mcp_thread is not None and self._mcp_thread.is_alive():
+            self.root.after(120, self._poll_mcp_ai_queue)
+            return
+        if not os.environ.get("OPENAI_API_KEY"):
+            self._ai_append_tool_log(
+                "WARNING",
+                "OPENAI_API_KEY not set — set workspace .env for live MCP + OpenAI (stub replies only).",
+            )
+            return
+        try:
+            from mcp_server.tk_worker import start_mcp_worker
+        except ImportError as exc:
+            self._ai_append_tool_log("ERROR", f"mcp_server import failed: {exc}")
+            return
+        self._mcp_thread, self._mcp_user_q, self._mcp_tk_q, self._mcp_stop = start_mcp_worker(
+            WORKSPACE_ROOT
+        )
+        self._ai_append_tool_log("INFO", "Starting MCP stdio worker (mcp_server/mcp_server_ros2.py)…")
+        self.root.after(120, self._poll_mcp_ai_queue)
+
+    def _poll_mcp_ai_queue(self) -> None:
+        tk_q = self._mcp_tk_q
+        if tk_q is None:
+            return
+        win = getattr(self, "_ai_assistant_win", None)
+        if win is None:
+            return
+        try:
+            if not win.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        try:
+            while True:
+                msg = tk_q.get_nowait()
+                if not msg:
+                    continue
+                kind = msg[0]
+                if kind == "reply" and len(msg) >= 3:
+                    _u, reply = msg[1], msg[2]
+                    self._ai_append_chat("assistant", reply)
+                    self._ai_append_tool_log(
+                        "INFO",
+                        f"reply received ({len(str(reply))} chars)",
+                    )
+                elif kind == "error":
+                    err = msg[1] if len(msg) > 1 else "unknown"
+                    self._ai_append_tool_log("ERROR", err)
+                    self._ai_append_chat("assistant", f"(Error) {err}")
+                elif kind == "info":
+                    self._ai_append_tool_log("INFO", msg[1] if len(msg) > 1 else "")
+        except queue.Empty:
+            pass
+        if self._mcp_tk_q is not None and getattr(self, "_ai_assistant_win", None) is not None:
+            try:
+                if self._ai_assistant_win.winfo_exists():
+                    self.root.after(120, self._poll_mcp_ai_queue)
+            except tk.TclError:
+                pass
+
     def _close_ai_assistant_window(self) -> None:
+        self._stop_ai_mcp_worker()
         self._ai_chat_text = None
         self._ai_input_var = None
         self._ai_tool_log = None
@@ -2200,7 +2322,7 @@ class TeachNavGUI:
         ).pack(side="left", padx=(12, 6), pady=(10, 10))
         tk.Label(
             hdr,
-            text="Chat · tools · call log (LLM / MCP integration pending)",
+            text="Chat · tools · MCP log (OpenAI + mcp_server/ when OPENAI_API_KEY is set)",
             font=FONT_SMALL,
             bg=C["crust"],
             fg=C["overlay0"],
@@ -2435,8 +2557,7 @@ class TeachNavGUI:
 
         self._ai_append_tool_log(
             "INFO",
-            "Window opened — tool catalogue matches mcp_server_ros2.py; "
-            "LLM and MCP bridge not connected yet.",
+            "Window opened — tools match mcp_server package; memory_context.txt at workspace root.",
         )
         self._ai_append_chat(
             "system",
@@ -2446,6 +2567,7 @@ class TeachNavGUI:
             self._ai_tool_list.selection_set(0)
             self._ai_tool_list.activate(0)
             self._ai_on_tool_select()
+        self._start_ai_mcp_worker()
 
     def _ai_append_chat(self, role: str, text: str) -> None:
         w = self._ai_chat_text
@@ -2514,11 +2636,19 @@ class TeachNavGUI:
             return
         self._ai_input_var.set("")
         self._ai_append_chat("user", raw)
-        self._ai_append_chat("assistant", AI_ASSISTANT_GENERIC_REPLY)
-        self._ai_append_tool_log(
-            "INFO",
-            f"chat: user message ({len(raw)} chars) — placeholder reply shown.",
-        )
+        if self._mcp_user_q is not None:
+            try:
+                self._mcp_user_q.put_nowait(raw)
+                self._ai_append_tool_log("INFO", "queued for OpenAI router + MCP tools")
+            except BaseException as exc:
+                self._ai_append_tool_log("ERROR", f"queue: {exc}")
+                self._ai_append_chat("assistant", AI_ASSISTANT_GENERIC_REPLY)
+        else:
+            self._ai_append_chat("assistant", AI_ASSISTANT_GENERIC_REPLY)
+            self._ai_append_tool_log(
+                "INFO",
+                "stub reply — set OPENAI_API_KEY and reopen AI assistant for MCP.",
+            )
         ent = self._ai_input_entry
         if ent is not None and ent.winfo_exists():
             ent.focus_set()

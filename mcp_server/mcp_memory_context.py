@@ -1,7 +1,7 @@
 """
-Sliding-window conversation memory + compact robot state for mcp_client_openai.py.
+Sliding-window conversation memory + compact robot state for the MCP client.
 
-Persists to memory_context.txt (human-readable). See project notes / mcp_instructions.txt.
+Persists to memory_context.txt at workspace root (human-readable).
 """
 
 from __future__ import annotations

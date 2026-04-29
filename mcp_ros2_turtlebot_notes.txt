@@ -39,7 +39,7 @@ d) import rclpy failed: No module named 'yaml'
 e) create_node failed deeper in stack: No module named 'numpy'
    - Install numpy in that interpreter.
 
-f) mcp_client_openai.py: server subprocess could not import rclpy while interactive
+f) mcp_server/mcp_client_openai.py: server subprocess could not import rclpy while interactive
    shell could — environment not passed to child process.
    - Fix: StdioServerParameters(..., env=os.environ.copy()) so PYTHONPATH and ROS
      vars reach the server.
@@ -65,8 +65,8 @@ g) Always source ROS in the shell before running rclpy-based code:
 
 5) MCP files in repo root
 -------------------------
-- mcp_server_ros2.py   — FastMCP server: chatter, camera snapshot, teleop, odom.
-- mcp_client_openai.py — OpenAI router + MCP stdio client (CALL rules for all tools).
+- mcp_server/mcp_server_ros2.py   — FastMCP server: chatter, camera snapshot, teleop, odom.
+- mcp_server/mcp_client_openai.py — OpenAI router + MCP stdio client (CALL rules for all tools).
 - requirements.txt     — mcp, openai, python-dotenv, pyyaml, numpy,
   opencv-python-headless; rclpy usually from sourced ROS.
 - .env                 — OPENAI_API_KEY, OPENAI_MODEL (client loads via dotenv).
@@ -144,7 +144,7 @@ Run the client (Gazebo should already be up; same machine as the sim):
   export MCP_USE_SIM_TIME=1          # match Gazebo /clock so cmd_vel time is consistent
   pip install -r requirements.txt    # if needed: mcp, openai, dotenv, pyyaml, numpy, opencv
   # .env must define OPENAI_API_KEY (and optional OPENAI_MODEL)
-  python3 mcp_client_openai.py
+  python3 -m mcp_server.mcp_client_openai
 
 Then type natural commands, e.g. "drive forward for 3 seconds", "turn left 2s", "stop".
 The client routes to tool teleop_move (TwistStamped on /cmd_vel).
@@ -173,20 +173,20 @@ Snapshot dir: temp/mcp_snapshots/ (under project root). Install OpenCV for snaps
 Prereqs (once per machine)
 - Source ROS and workspace: source /opt/ros/jazzy/setup.bash && source install/setup.bash
 - pip install -r requirements.txt (mcp, openai, etc.)
-- .env in repo root: OPENAI_API_KEY (and optional OPENAI_MODEL) for mcp_client_openai.py
+- .env in repo root: OPENAI_API_KEY (and optional OPENAI_MODEL) for mcp_server.mcp_client_openai
 - Use the same TURTLEBOT3_MODEL (e.g. burger or waffle_pi) in every terminal that runs
   Gazebo / Nav2 / MCP.
 
 How the MCP server runs (important)
 - Default workflow: you do NOT start the server in a separate terminal by hand.
-  mcp_client_openai.py launches mcp_server_ros2.py automatically as a subprocess (stdio
+  mcp_server/mcp_client_openai.py launches mcp_server/mcp_server_ros2.py automatically as a subprocess (stdio
   MCP) and passes env=os.environ.copy() so ROS and PYTHONPATH work in the server.
 - To run only the server (e.g. Cursor MCP config, debugging, another MCP host):
     cd ~/Desktop/mcp_approach
     source /opt/ros/jazzy/setup.bash
     source install/setup.bash
     export TURTLEBOT3_MODEL=burger
-    python3 mcp_server_ros2.py
+    python3 mcp_server/mcp_server_ros2.py
   That speaks MCP over stdio; it blocks the terminal until you stop it.
 
 Terminal layout (recommended)
@@ -220,9 +220,9 @@ Terminal layout (recommended)
   # Ensure .env exists with OPENAI_API_KEY
 
 4) Start MCP: run the OpenAI client (this starts the MCP server automatically)
-  python3 mcp_client_openai.py
+  python3 -m mcp_server.mcp_client_openai
   You should see a prompt like "OpenAI MCP client ready". Type commands at "You:".
-  Behind the scenes: child process = python3 mcp_server_ros2.py (do not run it again
+  Behind the scenes: child process = python3 mcp_server/mcp_server_ros2.py (do not run it again
   in another terminal unless you are using a different integration).
 
 5) Chat — natural language routes to tools

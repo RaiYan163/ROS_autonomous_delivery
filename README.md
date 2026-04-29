@@ -2,8 +2,8 @@
 
 This is a minimal starter setup with:
 
-- `mcp_server_ros2.py`: MCP server exposing ROS2 publish tools
-- `mcp_client_openai.py`: OpenAI-based wrapper that decides when to call MCP tools
+- `mcp_server/mcp_server_ros2.py`: MCP server exposing ROS2 tools (stdio)
+- `mcp_server/mcp_client_openai.py`: OpenAI-based wrapper + sliding-window memory; run as module (see below)
 
 ## 1) Prerequisites
 
@@ -56,7 +56,7 @@ In terminal B:
 
 ```bash
 source /opt/ros/<your_distro>/setup.bash
-python mcp_client_openai.py
+python3 -m mcp_server.mcp_client_openai
 ```
 
 Then type:

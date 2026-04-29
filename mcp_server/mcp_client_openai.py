@@ -8,14 +8,23 @@ import re
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from openai import OpenAI
-from dotenv import load_dotenv
 
-from mcp_memory_context import FILE_NAME, MemoryContext
+from .mcp_memory_context import FILE_NAME, MemoryContext
 
 load_dotenv()
+
+
+def workspace_root() -> Path:
+    """Repository root (parent of the ``mcp_server`` package)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def package_dir() -> Path:
+    return Path(__file__).resolve().parent
 
 
 class MCPWrapper:
@@ -103,10 +112,6 @@ Line templates:
 
     @staticmethod
     def _parse_teleop_from_user_text(text: str) -> tuple[str, float] | None:
-        """
-        If the LLM returns junk, still honor clear user motion commands.
-        Examples: "move the robot for 5 second", "drive forward 3s", "go left for 1.5 seconds"
-        """
         s = text.lower().strip()
         dur_m = re.search(
             r"(\d+(?:\.\d+)?)\s*(?:sec|second|seconds?|s)\b",
@@ -132,9 +137,6 @@ Line templates:
 
     @staticmethod
     def _wants_execute_navigation(text: str) -> bool:
-        """
-        If the router mistakenly picks get_navigation_help, still honor clear go/execute commands.
-        """
         s = text.lower().strip()
         if re.search(
             r"\b(execute\s+navigation|run\s+navigation|start\s+navigation)\b",
@@ -179,7 +181,6 @@ Line templates:
         return self._extract_result_text(result)
 
     async def _execute_command(self, command: str, user_input: str) -> str:
-        """Run MCP tools for a parsed CALL line (or handle NO TOOL / fallbacks)."""
         if command.startswith("CALL publish_message"):
             match = re.search(r"text=(.*)$", command)
             if not match:
@@ -290,22 +291,18 @@ Line templates:
         return reply
 
 
-def _project_root() -> Path:
-    return Path(__file__).resolve().parent
-
-
 async def chat_loop() -> None:
-    root = _project_root()
-    server_py = root / "mcp_server_ros2.py"
+    ws = workspace_root()
+    server_py = package_dir() / "mcp_server_ros2.py"
     if not server_py.is_file():
         raise RuntimeError(f"MCP server not found at {server_py}")
 
-    memory_path = root / FILE_NAME
+    memory_path = ws / FILE_NAME
     server_params = StdioServerParameters(
         command=sys.executable,
         args=[str(server_py)],
         env=os.environ.copy(),
-        cwd=str(root),
+        cwd=str(ws),
     )
 
     async with stdio_client(server_params) as (read_stream, write_stream):
