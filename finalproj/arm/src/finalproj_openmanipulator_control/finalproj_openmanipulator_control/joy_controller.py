@@ -81,12 +81,18 @@ class FinalProjJoyController(Node):
                 ['gripper_left_joint', 'gripper_right_joint_mimic'],
             ).value
         )
-        self.axis_to_joint = list(self.declare_parameter('axis_to_joint', [0, 1, 3, 4]).value)
+        self.select_joint_buttons = list(
+            self.declare_parameter('select_joint_buttons', [0, 1, 2, 3]).value
+        )
+        self.selected_joint_axis = int(self.declare_parameter('selected_joint_axis', 1).value)
         self.dpad_horizontal_axis = int(self.declare_parameter('dpad_horizontal_axis', 6).value)
         self.dpad_vertical_axis = int(self.declare_parameter('dpad_vertical_axis', 7).value)
         self.deadzone = float(self.declare_parameter('deadzone', 0.18).value)
         self.joint_velocity_scale = float(
             self.declare_parameter('joint_velocity_scale', 0.30).value
+        )
+        self.gripper_hold_rate = float(
+            self.declare_parameter('gripper_hold_rate', 0.55).value
         )
         self.direct_publish_rate = float(self.declare_parameter('direct_publish_rate', 50.0).value)
         self.motion_point_duration = float(
@@ -216,6 +222,7 @@ class FinalProjJoyController(Node):
         self.manual_joint_names: List[str] = []
         self.manual_velocities: List[float] = []
         self.behavior_busy = False
+        self.last_joy_time = None
 
         self.saved_joint_poses: List[Dict[str, float]] = []
         self.current_joint_motion: List[Dict[str, float]] = []
@@ -236,7 +243,10 @@ class FinalProjJoyController(Node):
             threading.Thread(target=self.start_servo_after_delay, daemon=True).start()
 
         self.get_logger().info('Final project OpenManipulator-X joystick controller ready.')
-        self.get_logger().info('Use axes for live joint control; buttons record and play behaviors.')
+        self.get_logger().info(
+            'Hold selector buttons 1-4 and move axis 1 for manual joint control; '
+            'use L1/R1 for gripper hold.'
+        )
 
     def joint_state_callback(self, msg):
         self.current_joint_state = msg
@@ -254,16 +264,23 @@ class FinalProjJoyController(Node):
     def joy_callback(self, msg):
         axes = list(msg.axes)
         buttons = list(msg.buttons)
+        now = self.get_clock().now()
+        if self.last_joy_time is None:
+            dt = 0.02
+        else:
+            dt = (now - self.last_joy_time).nanoseconds * 1e-9
+            dt = max(0.001, min(dt, 0.1))
+        self.last_joy_time = now
 
         previous_joint_names = list(self.manual_joint_names)
         joint_names = []
         velocities = []
-        for joint_name, axis_index in zip(self.arm_joints, self.axis_to_joint):
-            value = self.axis_value(axes, axis_index)
-            if value == 0.0:
-                continue
-            joint_names.append(joint_name)
-            velocities.append(value * self.joint_velocity_scale)
+        selected_joint_index = self.selected_arm_joint_index(buttons)
+        if selected_joint_index is not None and selected_joint_index < len(self.arm_joints):
+            value = self.axis_value(axes, self.selected_joint_axis)
+            if value != 0.0:
+                joint_names.append(self.arm_joints[selected_joint_index])
+                velocities.append(value * self.joint_velocity_scale)
 
         was_manual_active = bool(previous_joint_names)
         self.manual_joint_names = joint_names
@@ -274,6 +291,7 @@ class FinalProjJoyController(Node):
                 self.publish_joint_jog(self.manual_joint_names, self.manual_velocities)
             elif was_manual_active:
                 self.publish_joint_jog(previous_joint_names, [0.0] * len(previous_joint_names))
+            self.update_gripper_hold(buttons, dt)
 
         if self.dpad_rising(axes, axis_index=self.dpad_horizontal_axis, direction=1):
             self.log_recording_counts()
@@ -284,10 +302,6 @@ class FinalProjJoyController(Node):
         if self.dpad_rising(axes, axis_index=self.dpad_vertical_axis, direction=-1):
             self.record_ee_pose()
 
-        if self.rising_edge(buttons, self.button_close_gripper):
-            self.run_worker('close gripper', self.send_gripper_goal, self.gripper_closed_position)
-        if self.rising_edge(buttons, self.button_open_gripper):
-            self.run_worker('open gripper', self.send_gripper_goal, self.gripper_open_position)
         if self.rising_edge(buttons, self.button_record_joint):
             self.record_joint_pose()
         if self.rising_edge(buttons, self.button_record_ee):
@@ -314,13 +328,24 @@ class FinalProjJoyController(Node):
         self.last_buttons = buttons
         self.last_axes = axes
 
+    def selected_arm_joint_index(self, buttons):
+        for mapped_index, button_index in enumerate(self.select_joint_buttons):
+            if button_index < 0 or button_index >= len(buttons):
+                continue
+            if buttons[button_index] == 1:
+                if mapped_index < len(self.arm_joints):
+                    return mapped_index
+        return None
+
     def axis_value(self, axes, index):
         if index < 0 or index >= len(axes):
             return 0.0
         value = float(axes[index])
         if abs(value) < self.deadzone:
             return 0.0
-        return value
+        sign = 1.0 if value > 0.0 else -1.0
+        magnitude = (abs(value) - self.deadzone) / max(1e-6, (1.0 - self.deadzone))
+        return sign * min(1.0, magnitude)
 
     def rising_edge(self, buttons, index):
         if index < 0 or index >= len(buttons):
@@ -336,6 +361,32 @@ class FinalProjJoyController(Node):
         if direction > 0:
             return current > 0.5 and previous <= 0.5
         return current < -0.5 and previous >= -0.5
+
+    def update_gripper_hold(self, buttons, dt):
+        if self.behavior_busy:
+            return
+
+        open_held = 0 <= self.button_open_gripper < len(buttons) and buttons[self.button_open_gripper] == 1
+        close_held = 0 <= self.button_close_gripper < len(buttons) and buttons[self.button_close_gripper] == 1
+        if open_held == close_held:
+            return
+
+        current_position = self.current_gripper_position()
+        if current_position is None:
+            return
+
+        span = self.gripper_open_position - self.gripper_closed_position
+        step = self.gripper_hold_rate * span * dt
+        if open_held:
+            target_position = min(current_position + step, self.gripper_open_position)
+            if target_position <= current_position + 1e-7:
+                return
+        else:
+            target_position = max(current_position - step, self.gripper_closed_position)
+            if target_position >= current_position - 1e-7:
+                return
+
+        self.send_gripper_goal_async(target_position)
 
     def publish_joint_jog(self, joint_names, velocities):
         if self.behavior_busy or not joint_names or len(joint_names) != len(velocities):
@@ -727,6 +778,21 @@ class FinalProjJoyController(Node):
         if self.gripper_settle_sec > 0.0:
             time.sleep(self.gripper_settle_sec)
         self.get_logger().info(f'Gripper command sent: {position:.4f}.')
+        return True
+
+    def send_gripper_goal_async(self, position):
+        if not self.gripper_client.wait_for_server(timeout_sec=0.1):
+            self.get_logger().warning(
+                f'Gripper action server is not available: {self.gripper_action_name}'
+            )
+            return False
+
+        goal_msg = ParallelGripperCommand.Goal()
+        goal_msg.command.name = [self.gripper_joints[0]]
+        goal_msg.command.position = [float(position)]
+        goal_msg.command.velocity = []
+        goal_msg.command.effort = [100.0]
+        self.gripper_client.send_goal_async(goal_msg)
         return True
 
     def move_to_ee_pose(self, pose_dict, duration_sec):

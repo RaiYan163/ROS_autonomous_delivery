@@ -3,11 +3,13 @@ finalproj_joy_controller:
     arm_joints: ["joint1", "joint2", "joint3", "joint4"]
     gripper_joints: ["gripper_left_joint", "gripper_right_joint_mimic"]
 
-    axis_to_joint: [0, 1, 2, 3]
+    select_joint_buttons: [0, 1, 2, 3]
+    selected_joint_axis: 1
     dpad_horizontal_axis: 4
     dpad_vertical_axis: 5
     deadzone: 0.18
     joint_velocity_scale: 0.30
+    gripper_hold_rate: 0.55
     direct_publish_rate: 50.0
     motion_point_duration: 2.0
 
@@ -35,16 +37,16 @@ finalproj_joy_controller:
 
     recording_file: "~/.ros/finalproj_openmanipulator_recordings.json"
 
-    button_close_gripper: 0
-    button_open_gripper: 1
-    button_record_joint: 2
-    button_record_ee: 3
-    button_play_joint_pose: 4
-    button_toggle_pick_task: 5
+    button_open_gripper: 4
+    button_close_gripper: 5
+    button_record_joint: -1
+    button_record_ee: -1
+    button_play_joint_pose: 11
+    button_toggle_pick_task: 10
     button_save_motion: 6
     button_play_all_motions: 7
-    button_toggle_dance: 8
-    button_play_joint_motion: 9
-    button_play_ee_pose: 10
-    button_play_ee_sequence: 11
-    button_print_status: 12
+    button_toggle_dance: 9
+    button_play_joint_motion: 12
+    button_play_ee_pose: -1
+    button_play_ee_sequence: -1
+    button_print_status: 8
