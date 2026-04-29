@@ -17,6 +17,7 @@ Pages
   Turtlebot — main dashboard (panels below).
   Initialisation — map path, ROS CLI diagnostics (topic echo/hz/node list),
                     launch shortcuts, emergency zero cmd_vel.
+  AI assistant — separate Toplevel: chat, MCP-style tool catalogue, tool call log (LLM later).
 
 Panels (Turtlebot page)
 --------
@@ -170,6 +171,26 @@ GOAL_STATE_NAMES = {
     0: "Unknown", 1: "Accepted", 2: "Executing",
     3: "Canceling", 4: "Succeeded", 5: "Canceled", 6: "Aborted",
 }
+
+# AI assistant panel: mirrors mcp_server_ros2.py tool names (descriptions for UI only until wired).
+AI_ASSISTANT_TOOL_CATALOG: list[tuple[str, str]] = [
+    ("publish_message", "Publish a demo std_msgs/String to /chatter."),
+    ("get_status", "Lightweight ROS graph / topic sanity string."),
+    ("get_camera_snapshot", "Save latest camera frame to temp/mcp_snapshots/."),
+    ("teleop_move", "Timed cmd_vel burst: direction + duration_sec."),
+    ("get_odometry", "Summarise recent odometry."),
+    ("get_navigation_help", "Nav2 usage help text."),
+    ("set_navigation_initial_pose", "Publish initial pose for localisation."),
+    ("set_navigation_goal", "Stage a NavigateToPose goal (x, y, yaw_deg)."),
+    ("get_navigation_state", "Query Nav2 goal / state string."),
+    ("execute_navigation", "Run the staged navigation goal."),
+]
+
+# Stub reply for AI assistant UI testing (replace when LLM is wired).
+AI_ASSISTANT_GENERIC_REPLY = (
+    "Thanks — I received your message. This is a fixed placeholder reply for layout "
+    "testing; the real assistant will answer here once the LLM bridge is connected."
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Optional ROS2 import — GUI still opens (in demo mode) if ROS is not sourced
@@ -553,6 +574,13 @@ class TeachNavGUI:
         self._init_tool_short: dict[str, str] = {}
         self._closing_gui = False
         self._camera_photo_ref: tk.PhotoImage | None = None
+        self._ai_assistant_win: tk.Toplevel | None = None
+        self._ai_chat_text: tk.Text | None = None
+        self._ai_input_var: tk.StringVar | None = None
+        self._ai_tool_log: tk.Text | None = None
+        self._ai_tool_list: tk.Listbox | None = None
+        self._ai_tool_desc_lbl: tk.Label | None = None
+        self._ai_input_entry: tk.Entry | None = None
         self._setup_window()
         self._load_locations()
         self._build_nav_and_pages()
@@ -610,6 +638,23 @@ class TeachNavGUI:
             pady=6,
         )
         self._btn_nav_init.pack(side="left")
+
+        self._btn_ai_assistant = tk.Button(
+            nav_inner,
+            text="  AI assistant  ",
+            font=FONT_BODY,
+            command=self._open_ai_assistant_window,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=14,
+            pady=6,
+            bg=C["mauve"],
+            fg=C["base"],
+            activebackground=C["surface2"],
+            activeforeground=C["base"],
+        )
+        self._btn_ai_assistant.pack(side="left", padx=(8, 0))
 
         self._ros_badge = tk.Label(
             hdr,
@@ -2085,6 +2130,400 @@ class TeachNavGUI:
             self._log("ERROR", "ROS", f"Failed to initialise ROS node: {exc}")
 
     # ─────────────────────────────────────────────────────────────────────────
+    # AI assistant (separate Toplevel — chat + tools + tool log)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _close_ai_assistant_window(self) -> None:
+        self._ai_chat_text = None
+        self._ai_input_var = None
+        self._ai_tool_log = None
+        self._ai_tool_list = None
+        self._ai_tool_desc_lbl = None
+        self._ai_input_entry = None
+        w = getattr(self, "_ai_assistant_win", None)
+        self._ai_assistant_win = None
+        if w is not None:
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+
+    def _open_ai_assistant_window(self) -> None:
+        w = getattr(self, "_ai_assistant_win", None)
+        if w is not None:
+            try:
+                if w.winfo_exists():
+                    w.lift()
+                    w.focus_force()
+                    return
+            except tk.TclError:
+                self._ai_assistant_win = None
+        self._build_ai_assistant_window()
+
+    def _schedule_ai_assistant_sash(
+        self, win: tk.Toplevel, paned: tk.PanedWindow
+    ) -> None:
+        """Bias horizontal split toward chat (~72% left); run after geometry exists."""
+
+        def apply_sash() -> None:
+            try:
+                win.update_idletasks()
+                pw = paned.winfo_width()
+                if pw < 100:
+                    pw = max(win.winfo_width() - 40, 500)
+                x = max(400, int(pw * 0.72))
+                paned.sash_place(0, x, 2)
+            except tk.TclError:
+                pass
+
+        win.after(50, apply_sash)
+        win.after(250, apply_sash)
+
+    def _build_ai_assistant_window(self) -> None:
+        win = tk.Toplevel(self.root)
+        self._ai_assistant_win = win
+        win.title("AI assistant — TurtleBot Control Center")
+        win.configure(bg=C["base"])
+        win.geometry("1100x720")
+        win.minsize(820, 520)
+
+        win.protocol("WM_DELETE_WINDOW", self._close_ai_assistant_window)
+
+        hdr = tk.Frame(win, bg=C["crust"])
+        hdr.pack(fill="x")
+        tk.Label(
+            hdr,
+            text="  AI assistant",
+            font=FONT_TITLE,
+            bg=C["crust"],
+            fg=C["mauve"],
+        ).pack(side="left", padx=(12, 6), pady=(10, 10))
+        tk.Label(
+            hdr,
+            text="Chat · tools · call log (LLM / MCP integration pending)",
+            font=FONT_SMALL,
+            bg=C["crust"],
+            fg=C["overlay0"],
+        ).pack(side="left", pady=(12, 12))
+
+        # Bottom bar first so the paned area fills remaining height above it.
+        footer = tk.Frame(win, bg=C["crust"])
+        footer.pack(side="bottom", fill="x", padx=0, pady=0)
+        make_btn(
+            footer,
+            "Close AI assistant",
+            self._close_ai_assistant_window,
+            color="red",
+        ).pack(side="right", padx=(8, 12), pady=(8, 10))
+
+        paned = tk.PanedWindow(
+            win,
+            orient=tk.HORIZONTAL,
+            sashrelief="flat",
+            bg=C["base"],
+            sashwidth=6,
+        )
+        paned.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+
+        # ── Left: chat (transcript + ChatGPT-style composer at bottom) ─────
+        left = tk.Frame(paned, bg=C["base"])
+        outer_chat, inner_chat = make_panel(left, "💬  Chat")
+        outer_chat.pack(fill="both", expand=True)
+        inner_chat.rowconfigure(0, weight=1)
+        inner_chat.columnconfigure(0, weight=1)
+
+        self._ai_chat_text = tk.Text(
+            inner_chat,
+            font=FONT_BODY,
+            bg=C["mantle"],
+            fg=C["text"],
+            relief="flat",
+            bd=4,
+            wrap="word",
+            state="disabled",
+            insertbackground=C["text"],
+            selectbackground=C["surface1"],
+        )
+        self._ai_chat_text.tag_configure(
+            "role_label_user", foreground=C["sky"], font=("Helvetica", 9, "bold")
+        )
+        self._ai_chat_text.tag_configure("user_body", foreground=C["text"], font=FONT_BODY)
+        self._ai_chat_text.tag_configure(
+            "role_label_assistant",
+            foreground=C["mauve"],
+            font=("Helvetica", 9, "bold"),
+        )
+        self._ai_chat_text.tag_configure(
+            "assistant_body", foreground=C["text"], font=FONT_BODY
+        )
+        self._ai_chat_text.tag_configure(
+            "role_label_system", foreground=C["overlay0"], font=("Helvetica", 9, "bold")
+        )
+        self._ai_chat_text.tag_configure(
+            "system_body", foreground=C["overlay0"], font=FONT_SMALL
+        )
+        ch_sb = tk.Scrollbar(
+            inner_chat,
+            command=self._ai_chat_text.yview,
+            bg=C["surface0"],
+            troughcolor=C["mantle"],
+            activebackground=C["surface1"],
+        )
+        self._ai_chat_text.configure(yscrollcommand=ch_sb.set)
+        self._ai_chat_text.grid(row=0, column=0, sticky="nsew", pady=(0, 0))
+        ch_sb.grid(row=0, column=1, sticky="ns")
+
+        # Composer strip (fixed at bottom of chat card — like ChatGPT input bar)
+        composer = tk.Frame(
+            inner_chat,
+            bg=C["crust"],
+            highlightthickness=1,
+            highlightbackground=C["surface1"],
+        )
+        composer.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        composer.columnconfigure(0, weight=1)
+
+        tk.Label(
+            composer,
+            text="Message the assistant",
+            font=FONT_SMALL,
+            bg=C["crust"],
+            fg=C["overlay0"],
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 2))
+
+        input_row = tk.Frame(composer, bg=C["crust"])
+        input_row.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 6))
+        input_row.columnconfigure(0, weight=1)
+
+        self._ai_input_var = tk.StringVar()
+        self._ai_input_entry = tk.Entry(
+            input_row,
+            textvariable=self._ai_input_var,
+            font=FONT_BODY,
+            bg=C["mantle"],
+            fg=C["text"],
+            insertbackground=C["text"],
+            relief="flat",
+            bd=6,
+            highlightthickness=0,
+        )
+        self._ai_input_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 6), ipady=8)
+        self._ai_input_entry.bind("<Return>", lambda e: self._ai_on_send())
+        self._ai_input_entry.focus_set()
+
+        btn_send = make_btn(input_row, "Send", self._ai_on_send, color="blue")
+        btn_send.grid(row=0, column=1, padx=(0, 4), pady=(0, 6), sticky="ns")
+
+        bottom_row = tk.Frame(composer, bg=C["crust"])
+        bottom_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 10))
+        make_btn(bottom_row, "Clear chat", self._ai_clear_chat, color="gray").pack(
+            side="left"
+        )
+        tk.Label(
+            bottom_row,
+            text="Enter sends the message",
+            font=FONT_SMALL,
+            bg=C["crust"],
+            fg=C["overlay0"],
+        ).pack(side="right", padx=(8, 0))
+
+        paned.add(left, minsize=420)
+
+        # ── Right: tools (top) + tool log (bottom) — kept narrower via sash (see below).
+        right = tk.Frame(paned, bg=C["base"])
+        vpaned = tk.PanedWindow(
+            right,
+            orient=tk.VERTICAL,
+            sashrelief="flat",
+            bg=C["base"],
+            sashwidth=6,
+        )
+        vpaned.pack(fill="both", expand=True)
+
+        outer_tools, inner_tools = make_panel(vpaned, "🛠  Available tools")
+        desc_wrap = tk.Frame(inner_tools, bg=C["surface0"])
+        desc_wrap.pack(fill="both", expand=True)
+        desc_wrap.rowconfigure(0, weight=2)
+        desc_wrap.rowconfigure(1, weight=0)
+        desc_wrap.columnconfigure(0, weight=1)
+
+        lb_frame = tk.Frame(desc_wrap, bg=C["surface0"])
+        lb_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
+        lb_frame.rowconfigure(0, weight=1)
+        lb_frame.columnconfigure(0, weight=1)
+        self._ai_tool_list = tk.Listbox(
+            lb_frame,
+            font=FONT_MONO,
+            bg=C["mantle"],
+            fg=C["text"],
+            selectbackground=C["surface1"],
+            selectforeground=C["text"],
+            relief="flat",
+            bd=4,
+            highlightthickness=0,
+            activestyle="dotbox",
+        )
+        for name, _desc in AI_ASSISTANT_TOOL_CATALOG:
+            self._ai_tool_list.insert(tk.END, name)
+        lb_sb = tk.Scrollbar(
+            lb_frame,
+            command=self._ai_tool_list.yview,
+            bg=C["surface0"],
+            troughcolor=C["mantle"],
+        )
+        self._ai_tool_list.configure(yscrollcommand=lb_sb.set)
+        self._ai_tool_list.grid(row=0, column=0, sticky="nsew")
+        lb_sb.grid(row=0, column=1, sticky="ns")
+        self._ai_tool_list.bind("<<ListboxSelect>>", self._ai_on_tool_select)
+
+        self._ai_tool_desc_lbl = tk.Label(
+            desc_wrap,
+            text="Select a tool to see its description.",
+            font=FONT_SMALL,
+            bg=C["surface0"],
+            fg=C["subtext"],
+            anchor="nw",
+            justify="left",
+            wraplength=220,
+        )
+        self._ai_tool_desc_lbl.grid(row=1, column=0, sticky="ew")
+
+        vpaned.add(outer_tools, minsize=200)
+
+        outer_log, inner_log = make_panel(vpaned, "📜  Tool log")
+        inner_log.rowconfigure(0, weight=1)
+        inner_log.columnconfigure(0, weight=1)
+        self._ai_tool_log = tk.Text(
+            inner_log,
+            font=FONT_MONO,
+            bg=C["mantle"],
+            fg=C["text"],
+            relief="flat",
+            bd=4,
+            wrap="word",
+            state="disabled",
+            height=10,
+            insertbackground=C["text"],
+            selectbackground=C["surface1"],
+        )
+        self._ai_tool_log.tag_configure("INFO", foreground=C["teal"])
+        self._ai_tool_log.tag_configure("WARNING", foreground=C["yellow"])
+        self._ai_tool_log.tag_configure("ERROR", foreground=C["red"])
+        self._ai_tool_log.tag_configure("DEBUG", foreground=C["overlay0"])
+        log_sb = tk.Scrollbar(
+            inner_log,
+            command=self._ai_tool_log.yview,
+            bg=C["surface0"],
+            troughcolor=C["mantle"],
+        )
+        self._ai_tool_log.configure(yscrollcommand=log_sb.set)
+        self._ai_tool_log.grid(row=0, column=0, sticky="nsew")
+        log_sb.grid(row=0, column=1, sticky="ns")
+
+        row_log_btn = tk.Frame(inner_log, bg=C["surface0"])
+        row_log_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        make_btn(row_log_btn, "Clear tool log", self._ai_clear_tool_log, color="gray").pack(
+            side="left"
+        )
+
+        vpaned.add(outer_log, minsize=160)
+
+        paned.add(right, minsize=220)
+
+        self._schedule_ai_assistant_sash(win, paned)
+
+        self._ai_append_tool_log(
+            "INFO",
+            "Window opened — tool catalogue matches mcp_server_ros2.py; "
+            "LLM and MCP bridge not connected yet.",
+        )
+        self._ai_append_chat(
+            "system",
+            "Stub mode — your text appears above; the assistant uses a placeholder reply for UI testing.",
+        )
+        if self._ai_tool_list is not None and self._ai_tool_list.size() > 0:
+            self._ai_tool_list.selection_set(0)
+            self._ai_tool_list.activate(0)
+            self._ai_on_tool_select()
+
+    def _ai_append_chat(self, role: str, text: str) -> None:
+        w = self._ai_chat_text
+        if w is None:
+            return
+        w.config(state="normal")
+        if role == "user":
+            w.insert("end", "You\n", ("role_label_user",))
+            w.insert("end", f"{text}\n\n", ("user_body",))
+        elif role == "assistant":
+            w.insert("end", "Assistant\n", ("role_label_assistant",))
+            w.insert("end", f"{text}\n\n", ("assistant_body",))
+        else:
+            w.insert("end", "System\n", ("role_label_system",))
+            w.insert("end", f"{text}\n\n", ("system_body",))
+        w.see("end")
+        w.config(state="disabled")
+
+    def _ai_append_tool_log(self, level: str, message: str) -> None:
+        w = self._ai_tool_log
+        if w is None:
+            return
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] [{level}] {message}\n"
+        tag = level if level in ("INFO", "WARNING", "ERROR", "DEBUG") else "DEBUG"
+        w.config(state="normal")
+        w.insert("end", line, (tag,))
+        w.see("end")
+        w.config(state="disabled")
+
+    def _ai_clear_chat(self) -> None:
+        w = self._ai_chat_text
+        if w is None:
+            return
+        w.config(state="normal")
+        w.delete("1.0", "end")
+        w.config(state="disabled")
+        self._ai_append_tool_log("INFO", "Chat cleared.")
+
+    def _ai_clear_tool_log(self) -> None:
+        w = self._ai_tool_log
+        if w is None:
+            return
+        w.config(state="normal")
+        w.delete("1.0", "end")
+        w.config(state="disabled")
+
+    def _ai_on_tool_select(self, _event=None) -> None:
+        lb = self._ai_tool_list
+        lbl = self._ai_tool_desc_lbl
+        if lb is None or lbl is None:
+            return
+        sel = lb.curselection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if 0 <= idx < len(AI_ASSISTANT_TOOL_CATALOG):
+            name, desc = AI_ASSISTANT_TOOL_CATALOG[idx]
+            lbl.config(text=f"{name}\n{desc}")
+
+    def _ai_on_send(self) -> None:
+        if self._ai_input_var is None:
+            return
+        raw = self._ai_input_var.get().strip()
+        if not raw:
+            return
+        self._ai_input_var.set("")
+        self._ai_append_chat("user", raw)
+        self._ai_append_chat("assistant", AI_ASSISTANT_GENERIC_REPLY)
+        self._ai_append_tool_log(
+            "INFO",
+            f"chat: user message ({len(raw)} chars) — placeholder reply shown.",
+        )
+        ent = self._ai_input_entry
+        if ent is not None and ent.winfo_exists():
+            ent.focus_set()
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Clean shutdown
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -2097,6 +2536,11 @@ class TeachNavGUI:
                 pass
             return
         self._closing_gui = True
+
+        try:
+            self._close_ai_assistant_window()
+        except BaseException:
+            pass
 
         node_ref = self._ros_node
         self._ros_node = None
