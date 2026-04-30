@@ -9,6 +9,11 @@
 # starts the GUI.  Edit the ROS_DISTRO variable if you are on a different
 # ROS2 release (default: jazzy).
 # DDS / model / RMW defaults are applied inside turtlebot_gui.py (ROS_* constants).
+#
+# MCP / OpenAI deps (mcp package) often live in a conda env — point GUI_PYTHON at that interpreter:
+#   conda activate sdr
+#   export GUI_PYTHON="$(command -v python)"
+#   bash control_center/run_gui.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
 
@@ -47,9 +52,12 @@ else
     echo "         Run 'colcon build' from $WORKSPACE_ROOT first."
 fi
 
+PYTHON_CMD="${GUI_PYTHON:-python3}"
+
 echo ""
 echo "  Starting GUI..."
+echo "  Python    : $PYTHON_CMD"
 echo ""
 
 cd "$WORKSPACE_ROOT"
-exec python3 "$SCRIPT_DIR/turtlebot_gui.py" "$@"
+exec "$PYTHON_CMD" "$SCRIPT_DIR/turtlebot_gui.py" "$@"

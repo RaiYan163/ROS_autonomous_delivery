@@ -168,13 +168,26 @@ C = {
     "teal":     "#94e2d5",   # save action
 }
 
-FONT_TITLE  = ("Helvetica", 13, "bold")
-FONT_HEADER = ("Helvetica", 10, "bold")
-FONT_BODY   = ("Helvetica", 9)
-FONT_MONO   = ("Courier", 9)
-FONT_SMALL  = ("Helvetica", 8)
+# ── Typography — larger readable defaults; Tk substitutes if a face is missing ──
+if sys.platform == "darwin":
+    _FONT_SANS = "Helvetica Neue"
+    _FONT_MONO = "Menlo"
+elif sys.platform == "win32":
+    _FONT_SANS = "Segoe UI"
+    _FONT_MONO = "Consolas"
+else:
+    _FONT_SANS = "DejaVu Sans"
+    _FONT_MONO = "DejaVu Sans Mono"
 
-PAD  = {"padx": 6, "pady": 4}
+FONT_TITLE = (_FONT_SANS, 16, "bold")
+FONT_HEADER = (_FONT_SANS, 12, "bold")
+FONT_BODY = (_FONT_SANS, 11)
+FONT_BODY_BOLD = (_FONT_SANS, 11, "bold")
+FONT_MONO = (_FONT_MONO, 11)
+FONT_SMALL = (_FONT_SANS, 10)
+FONT_DOT = (_FONT_SANS, 13)
+
+PAD = {"padx": 6, "pady": 4}
 
 # Human-readable Nav2 goal state names (matches action_msgs GoalStatus codes)
 GOAL_STATE_NAMES = {
@@ -182,18 +195,48 @@ GOAL_STATE_NAMES = {
     3: "Canceling", 4: "Succeeded", 5: "Canceled", 6: "Aborted",
 }
 
-# AI assistant panel: mirrors mcp_server/mcp_server_ros2.py tool names.
+# AI assistant panel: mirrors mcp_server/mcp_server_ros2.py tool names (keep in sync).
 AI_ASSISTANT_TOOL_CATALOG: list[tuple[str, str]] = [
-    ("publish_message", "Publish a demo std_msgs/String to /chatter."),
-    ("get_status", "Lightweight ROS graph / topic sanity string."),
-    ("get_camera_snapshot", "Save latest camera frame to temp/mcp_snapshots/."),
-    ("teleop_move", "Timed cmd_vel burst: direction + duration_sec."),
-    ("get_odometry", "Summarise recent odometry."),
-    ("get_navigation_help", "Nav2 usage help text."),
-    ("set_navigation_initial_pose", "Publish initial pose for localisation."),
-    ("set_navigation_goal", "Stage a NavigateToPose goal (x, y, yaw_deg)."),
-    ("get_navigation_state", "Query Nav2 goal / state string."),
-    ("execute_navigation", "Run the staged navigation goal."),
+    ("cancel_navigation", "Cancel active async NavigateToPose goal."),
+    ("delete_saved_location", "Remove waypoint from shared JSON."),
+    ("emergency_stop", "Repeated zero TwistStamped on /cmd_vel."),
+    ("execute_navigation", "Blocking NavigateToPose for staged goal."),
+    ("execute_navigation_async", "Non-blocking NavigateToPose with feedback."),
+    ("get_amcl_pose", "Latest localized pose from /amcl_pose."),
+    ("get_battery_status", "Battery summary from /battery_state."),
+    ("get_camera_snapshot", "JPEG snapshot (raw image or compressed)."),
+    ("get_joy_state", "Joystick axes/buttons plus timeout disconnect."),
+    ("get_lidar_scan", "LaserScan sectors or sparse full."),
+    ("get_navigation_feedback", "Async Nav2 distance_remaining or outcome."),
+    ("get_navigation_help", "Nav2 + launches + waypoint workflow text."),
+    ("get_navigation_state", "Stored initial pose and goal."),
+    ("get_odometry", "Latest /odom pose and twist."),
+    ("get_saved_location", "Read one waypoint from JSON."),
+    ("get_status", "Configured ROS topics + paths."),
+    ("get_tf_transform", "TF2 lookup between two frames."),
+    ("list_managed_launches", "MCP-managed ros2 launch PID status."),
+    ("list_saved_locations", "Dump waypoint JSON."),
+    ("manual_recovery", "Advisory recovery + cancel async nav."),
+    ("navigate_to_saved_location", "Goal from JSON + blocking NavigateToPose."),
+    ("publish_message", "std_msgs/String to /chatter."),
+    ("rename_saved_location", "Rename waypoint key in JSON."),
+    ("ros2_node_list", "`ros2 node list` subprocess."),
+    ("ros2_topic_echo_once", "`ros2 topic echo --once` with timeout."),
+    ("ros2_topic_hz", "`ros2 topic hz` sample window."),
+    ("ros2_topic_info", "`ros2 topic info`."),
+    ("ros2_topic_list", "`ros2 topic list` optional regex."),
+    ("save_current_location", "Append waypoint from current /amcl_pose."),
+    ("set_navigation_goal", "Stage map-frame Nav2 goal."),
+    ("set_navigation_initial_pose", "/initialpose publisher for AMCL."),
+    ("start_joystick_teleop_launch", "Managed joystick teleop launch."),
+    ("start_navigation_launch", "Managed turtlebot3_navigation2 launch."),
+    ("stop_all_managed_launches", "Kill all MCP-managed launches."),
+    ("stop_joystick_teleop_launch", "Stop managed joystick launch."),
+    ("stop_navigation_launch", "Stop managed Nav2 launch."),
+    ("teleop_move", "/cmd_vel TwistStamped timed bursts."),
+    ("update_saved_location_coords", "Patch x/y/yaw_deg in waypoint JSON."),
+    ("update_saved_location_to_current", "Overwrite waypoint with current AMCL pose."),
+    ("wait_for_navigation_result", "Block until async NavigateToPose result."),
 ]
 
 # Stub reply for AI assistant UI testing (replace when LLM is wired).
@@ -560,7 +603,7 @@ def make_label(parent: tk.Widget, text: str = "", color: str = "text",
 
 def make_dot(parent: tk.Widget, color: str = "surface2") -> tk.Label:
     """Small colored circle used as a process-running indicator."""
-    return tk.Label(parent, text="●", font=("Helvetica", 11),
+    return tk.Label(parent, text="●", font=FONT_DOT,
                     bg=C["surface0"], fg=C[color])
 
 
@@ -1002,7 +1045,7 @@ class TeachNavGUI:
         tk.Label(row1, text="Mode:", font=FONT_BODY, width=_LW, anchor="w",
                  bg=C["surface0"], fg=C["subtext"]).pack(side="left")
         self._mode_lbl = tk.Label(row1, text="Idle",
-                                  font=("Helvetica", 9, "bold"),
+                                  font=FONT_BODY_BOLD,
                                   bg=C["surface0"], fg=C["subtext"], width=14, anchor="w")
         self._mode_lbl.pack(side="left")
         tk.Label(row1, text="Battery:", font=FONT_BODY, width=8, anchor="w",
@@ -2367,22 +2410,22 @@ class TeachNavGUI:
             selectbackground=C["surface1"],
         )
         self._ai_chat_text.tag_configure(
-            "role_label_user", foreground=C["sky"], font=("Helvetica", 9, "bold")
+            "role_label_user", foreground=C["sky"], font=FONT_BODY_BOLD
         )
         self._ai_chat_text.tag_configure("user_body", foreground=C["text"], font=FONT_BODY)
         self._ai_chat_text.tag_configure(
             "role_label_assistant",
             foreground=C["mauve"],
-            font=("Helvetica", 9, "bold"),
+            font=FONT_BODY_BOLD,
         )
         self._ai_chat_text.tag_configure(
             "assistant_body", foreground=C["text"], font=FONT_BODY
         )
         self._ai_chat_text.tag_configure(
-            "role_label_system", foreground=C["overlay0"], font=("Helvetica", 9, "bold")
+            "role_label_system", foreground=C["overlay0"], font=FONT_BODY_BOLD
         )
         self._ai_chat_text.tag_configure(
-            "system_body", foreground=C["overlay0"], font=FONT_SMALL
+            "system_body", foreground=C["overlay0"], font=FONT_BODY
         )
         ch_sb = tk.Scrollbar(
             inner_chat,
@@ -2559,10 +2602,18 @@ class TeachNavGUI:
             "INFO",
             "Window opened — tools match mcp_server package; memory_context.txt at workspace root.",
         )
-        self._ai_append_chat(
-            "system",
-            "Stub mode — your text appears above; the assistant uses a placeholder reply for UI testing.",
-        )
+        if os.environ.get("OPENAI_API_KEY"):
+            self._ai_append_chat(
+                "system",
+                "OpenAI + MCP — messages route to MCP tools (same stack as python -m "
+                "mcp_server.mcp_client_openai). Ensure ROS + workspace are sourced for this shell.",
+            )
+        else:
+            self._ai_append_chat(
+                "system",
+                "Stub mode — set OPENAI_API_KEY in workspace .env and reopen this window "
+                "for live MCP tool calls.",
+            )
         if self._ai_tool_list is not None and self._ai_tool_list.size() > 0:
             self._ai_tool_list.selection_set(0)
             self._ai_tool_list.activate(0)

@@ -150,16 +150,34 @@ Then type natural commands, e.g. "drive forward for 3 seconds", "turn left 2s", 
 The client routes to tool teleop_move (TwistStamped on /cmd_vel).
 
 - publish_message(text) -> /chatter
-- get_status() -> lists chatter, cmd_vel, odom, camera topics and snapshot dir
-- get_camera_snapshot() -> saves latest /camera/image_raw to temp/mcp_snapshots/*.jpg
-- teleop_move(direction, duration_sec) -> /cmd_vel for duration then stop
-  (direction: forward | back | left | right | stop)
-- get_odometry() -> summary from /odom (pose + yaw + twist)
-- get_navigation_help() -> Nav2 workflow (initial pose, goal, execute)
-- set_navigation_initial_pose(x, y, yaw_deg) -> publish /initialpose (AMCL, map frame)
-- set_navigation_goal(x, y, yaw_deg=0) -> store goal for execute_navigation
-- get_navigation_state() -> show stored initial pose and goal
-- execute_navigation() -> NavigateToPose action for stored goal (Nav2 must be running)
+- get_status() -> chatter, cmd_vel, odom, camera + compressed topics, TF topics, waypoint file path, default map YAML, snapshot dir
+- get_camera_snapshot(use_compressed=false) -> JPEG from raw or compressed camera topic
+- teleop_move(direction, duration_sec) -> TwistStamped /cmd_vel
+- emergency_stop(repeats=5) -> repeated zero /cmd_vel
+- get_odometry() -> summary from /odom
+- get_amcl_pose() -> /amcl_pose map pose
+- get_battery_status() -> /battery_state
+- get_joy_state() -> /joy with disconnect timeout matching GUI (2 s)
+- get_lidar_scan(sectors_deg=8, full=false) -> /scan sectors or sparse full
+- get_tf_transform(target_frame, source_frame) -> TF2 lookup
+- ros2_node_list() -> ros2 node list
+- ros2_topic_list(filter_regex=null) -> ros2 topic list
+- ros2_topic_info(topic) -> ros2 topic info
+- ros2_topic_echo_once(topic, timeout_sec=10)
+- ros2_topic_hz(topic, sample_seconds<=10)
+- start_navigation_launch / stop_navigation_launch -> turtlebot3_navigation2 (managed subprocess)
+- start_joystick_teleop_launch / stop_joystick_teleop_launch -> custom_turtlebot_nodes (managed)
+- list_managed_launches / stop_all_managed_launches
+- Waypoints JSON (same as GUI saved_locations.json):
+  list/get/save/update/rename/delete + navigate_to_saved_location(name)
+- get_navigation_help() -> Nav2 + launch + waypoint workflow
+- set_navigation_initial_pose(x, y, yaw_deg)
+- set_navigation_goal(x, y, yaw_deg=0) -> staged goal
+- get_navigation_state() -> stored poses + async handle hints
+- execute_navigation() -> blocking NavigateToPose
+- execute_navigation_async() -> non-blocking NavigateToPose with feedback
+- get_navigation_feedback() / wait_for_navigation_result(timeout_sec) / cancel_navigation()
+- manual_recovery() -> advisory + cancel async navigation
 
 Snapshot dir: temp/mcp_snapshots/ (under project root). Install OpenCV for snapshots:
   pip install opencv-python-headless
