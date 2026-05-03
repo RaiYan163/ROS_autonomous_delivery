@@ -86,6 +86,8 @@ def generate_launch_description():
     joy_device_path = LaunchConfiguration('joy_device_path')
     joy_deadzone = LaunchConfiguration('joy_deadzone')
     joy_autorepeat_rate = LaunchConfiguration('joy_autorepeat_rate')
+    recording = LaunchConfiguration('recording')
+    auto_start_servo = LaunchConfiguration('auto_start_servo')
 
     return LaunchDescription(
         [
@@ -184,6 +186,16 @@ def generate_launch_description():
                 default_value=controller_config_path,
                 description='YAML file with final-project controller parameters.',
             ),
+            DeclareLaunchArgument(
+                'recording',
+                default_value='false',
+                description='Enable LT/RT motion recording and playback controls.',
+            ),
+            DeclareLaunchArgument(
+                'auto_start_servo',
+                default_value='true',
+                description='Ask the controller to switch and unpause MoveIt Servo on startup.',
+            ),
             OpaqueFunction(
                 function=include_optional_launch,
                 args=[
@@ -236,7 +248,11 @@ def generate_launch_description():
                 output='screen',
                 parameters=[
                     ParameterFile(controller_config_arg, allow_substs=True),
-                    {'use_sim_time': use_sim_time},
+                    {
+                        'use_sim_time': use_sim_time,
+                        'recording_enabled': ParameterValue(recording, value_type=bool),
+                        'auto_start_servo': ParameterValue(auto_start_servo, value_type=bool),
+                    },
                 ],
                 condition=IfCondition(LaunchConfiguration('launch_controller')),
             ),

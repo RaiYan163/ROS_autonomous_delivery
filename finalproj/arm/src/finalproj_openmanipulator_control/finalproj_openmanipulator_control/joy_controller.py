@@ -1,4 +1,3 @@
-import json
 import math
 import os
 import random
@@ -26,6 +25,7 @@ from tf2_ros import Buffer
 from tf2_ros import TransformListener
 from trajectory_msgs.msg import JointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
+import yaml
 
 try:
     from moveit_msgs.msg import RobotState
@@ -89,7 +89,7 @@ class FinalProjJoyController(Node):
         self.dpad_vertical_axis = int(self.declare_parameter('dpad_vertical_axis', 7).value)
         self.deadzone = float(self.declare_parameter('deadzone', 0.18).value)
         self.joint_velocity_scale = float(
-            self.declare_parameter('joint_velocity_scale', 0.30).value
+            self.declare_parameter('joint_velocity_scale', 0.60).value
         )
         self.gripper_hold_rate = float(
             self.declare_parameter('gripper_hold_rate', 0.55).value
@@ -98,11 +98,21 @@ class FinalProjJoyController(Node):
         self.motion_point_duration = float(
             self.declare_parameter('motion_point_duration', 2.0).value
         )
+        self.motion_sample_rate_hz = float(
+            self.declare_parameter('motion_sample_rate_hz', 20.0).value
+        )
+        self.playback_finish_margin_sec = float(
+            self.declare_parameter('playback_finish_margin_sec', 0.5).value
+        )
+        self.playback_start_move_duration = float(
+            self.declare_parameter('playback_start_move_duration', 3.0).value
+        )
+        self.recording_enabled = bool(self.declare_parameter('recording_enabled', False).value)
         self.recording_file = os.path.expanduser(
             str(
                 self.declare_parameter(
                     'recording_file',
-                    '~/.ros/finalproj_openmanipulator_recordings.json',
+                    '~/.ros/finalproj_openmanipulator_motion.yaml',
                 ).value
             )
         )
@@ -173,6 +183,14 @@ class FinalProjJoyController(Node):
             self.declare_parameter('button_play_ee_sequence', 11).value
         )
         self.button_print_status = int(self.declare_parameter('button_print_status', 12).value)
+        self.button_record_motion = int(self.declare_parameter('button_record_motion', 6).value)
+        self.button_play_motion = int(self.declare_parameter('button_play_motion', 7).value)
+        self.left_trigger_axis = int(self.declare_parameter('left_trigger_axis', -1).value)
+        self.right_trigger_axis = int(self.declare_parameter('right_trigger_axis', -1).value)
+        self.trigger_threshold = float(self.declare_parameter('trigger_threshold', 0.5).value)
+        self.trigger_release_debounce_sec = float(
+            self.declare_parameter('trigger_release_debounce_sec', 0.25).value
+        )
 
         self.joint_pub = self.create_publisher(JointJog, self.joint_jog_topic, 10)
         self.trajectory_pub = self.create_publisher(
@@ -229,6 +247,15 @@ class FinalProjJoyController(Node):
         self.saved_joint_motions: List[List[Dict[str, float]]] = []
         self.saved_ee_poses: List[Dict[str, object]] = []
         self.current_ee_sequence: List[Dict[str, object]] = []
+        self.recorded_motion: List[Dict[str, object]] = []
+        self.recording_active = False
+        self.recording_start_time = None
+        self.last_record_sample_time = None
+        self.recording_lock = threading.Lock()
+        self.playback_stop = threading.Event()
+        self.playback_thread: Optional[threading.Thread] = None
+        self.record_trigger_state = {'down': False, 'false_since': time.monotonic()}
+        self.play_trigger_state = {'down': False, 'false_since': time.monotonic()}
 
         self.random_dance_stop = threading.Event()
         self.random_dance_thread: Optional[threading.Thread] = None
@@ -237,7 +264,7 @@ class FinalProjJoyController(Node):
         self.pick_cycle_source_sign = 1.0
         self.pick_cycle_initialized = False
 
-        self.load_recordings()
+        self.load_recording()
 
         if self.auto_start_servo:
             threading.Thread(target=self.start_servo_after_delay, daemon=True).start()
@@ -247,19 +274,36 @@ class FinalProjJoyController(Node):
             'Hold selector buttons 1-4 and move axis 1 for manual joint control; '
             'use L1/R1 for gripper hold.'
         )
+        if self.recording_enabled:
+            self.get_logger().info('Recording enabled: press LT to start/stop recording; press RT to play/stop.')
+        else:
+            self.get_logger().info('Recording disabled. Press RT to play/stop an existing recording.')
 
     def joint_state_callback(self, msg):
         self.current_joint_state = msg
+        self.record_motion_sample(msg)
 
     def start_servo_after_delay(self):
         time.sleep(1.0)
-        for _ in range(20):
-            if not rclpy.ok():
-                return
-            if self.start_servo():
-                return
-            time.sleep(0.5)
-        self.get_logger().warning('MoveIt Servo never became available for auto-start.')
+        if self.servo_command_type_client is None:
+            self.get_logger().warning('MoveIt Servo command type service is unavailable.')
+            return
+
+        deadline = time.monotonic() + 30.0
+        while rclpy.ok() and time.monotonic() < deadline:
+            command_type_ready = self.servo_command_type_client.wait_for_service(timeout_sec=0.5)
+            pause_ready = self.servo_pause_client.wait_for_service(timeout_sec=0.5)
+            if command_type_ready and pause_ready:
+                if self.start_servo():
+                    return
+                time.sleep(1.0)
+            else:
+                time.sleep(0.5)
+
+        self.get_logger().warning(
+            'MoveIt Servo never became available for auto-start. '
+            'Check that the arm-side launch is running and ROS_DOMAIN_ID matches.'
+        )
 
     def joy_callback(self, msg):
         axes = list(msg.axes)
@@ -271,6 +315,13 @@ class FinalProjJoyController(Node):
             dt = (now - self.last_joy_time).nanoseconds * 1e-9
             dt = max(0.001, min(dt, 0.1))
         self.last_joy_time = now
+
+        now_monotonic = time.monotonic()
+        if self.recording_enabled:
+            if self.rising_record_trigger(buttons, axes, now_monotonic):
+                self.toggle_motion_recording()
+        if self.rising_play_trigger(buttons, axes, now_monotonic):
+            self.toggle_motion_playback()
 
         previous_joint_names = list(self.manual_joint_names)
         joint_names = []
@@ -296,32 +347,12 @@ class FinalProjJoyController(Node):
         if self.dpad_rising(axes, axis_index=self.dpad_horizontal_axis, direction=1):
             self.log_recording_counts()
         if self.dpad_rising(axes, axis_index=self.dpad_horizontal_axis, direction=-1):
-            self.clear_current_buffers()
-        if self.dpad_rising(axes, axis_index=self.dpad_vertical_axis, direction=1):
-            self.record_joint_pose()
-        if self.dpad_rising(axes, axis_index=self.dpad_vertical_axis, direction=-1):
-            self.record_ee_pose()
+            self.clear_recorded_motion()
 
-        if self.rising_edge(buttons, self.button_record_joint):
-            self.record_joint_pose()
-        if self.rising_edge(buttons, self.button_record_ee):
-            self.record_ee_pose()
-        if self.rising_edge(buttons, self.button_play_joint_pose):
-            self.run_worker('play joint pose', self.play_last_joint_pose)
-        if self.rising_edge(buttons, self.button_play_joint_motion):
-            self.run_worker('play joint motion', self.play_last_joint_motion)
-        if self.rising_edge(buttons, self.button_save_motion):
-            self.save_current_joint_motion()
-        if self.rising_edge(buttons, self.button_play_all_motions):
-            self.run_worker('play all motions', self.play_all_joint_motions)
         if self.rising_edge(buttons, self.button_toggle_dance):
             self.toggle_random_dance()
         if self.rising_edge(buttons, self.button_toggle_pick_task):
             self.toggle_pick_task()
-        if self.rising_edge(buttons, self.button_play_ee_pose):
-            self.run_worker('play EE pose', self.play_last_ee_pose)
-        if self.rising_edge(buttons, self.button_play_ee_sequence):
-            self.run_worker('play EE sequence', self.play_ee_sequence)
         if self.rising_edge(buttons, self.button_print_status):
             self.print_current_state()
 
@@ -361,6 +392,58 @@ class FinalProjJoyController(Node):
         if direction > 0:
             return current > 0.5 and previous <= 0.5
         return current < -0.5 and previous >= -0.5
+
+    def trigger_pressed(self, buttons, axes, button_index, axis_index):
+        button_down = 0 <= button_index < len(buttons) and buttons[button_index] == 1
+        if button_down:
+            return True
+        if axis_index < 0 or axis_index >= len(axes):
+            return False
+        return float(axes[axis_index]) >= self.trigger_threshold
+
+    def record_trigger_pressed(self, buttons, axes):
+        return self.trigger_pressed(
+            buttons,
+            axes,
+            self.button_record_motion,
+            self.left_trigger_axis,
+        )
+
+    def play_trigger_pressed(self, buttons, axes):
+        return self.trigger_pressed(
+            buttons,
+            axes,
+            self.button_play_motion,
+            self.right_trigger_axis,
+        )
+
+    def debounced_trigger_edge(self, raw_pressed, state, now):
+        if raw_pressed:
+            state['false_since'] = None
+            if not state['down']:
+                state['down'] = True
+                return True
+            return False
+
+        if state['false_since'] is None:
+            state['false_since'] = now
+        if state['down'] and now - state['false_since'] >= self.trigger_release_debounce_sec:
+            state['down'] = False
+        return False
+
+    def rising_record_trigger(self, buttons, axes, now):
+        return self.debounced_trigger_edge(
+            self.record_trigger_pressed(buttons, axes),
+            self.record_trigger_state,
+            now,
+        )
+
+    def rising_play_trigger(self, buttons, axes, now):
+        return self.debounced_trigger_edge(
+            self.play_trigger_pressed(buttons, axes),
+            self.play_trigger_state,
+            now,
+        )
 
     def update_gripper_hold(self, buttons, dt):
         if self.behavior_busy:
@@ -504,6 +587,215 @@ class FinalProjJoyController(Node):
                 break
 
         return pose
+
+    def extract_motion_waypoint(self, msg):
+        joint_map = {
+            name: position
+            for name, position in zip(msg.name, msg.position)
+        }
+        positions_arm = []
+        for joint in self.arm_joints:
+            if joint not in joint_map:
+                return None
+            positions_arm.append(float(joint_map[joint]))
+
+        gripper = None
+        for joint in self.gripper_joints:
+            if joint in joint_map:
+                gripper = float(joint_map[joint])
+                break
+
+        return {
+            'positions_arm': positions_arm,
+            'gripper': gripper,
+            'time_from_start_sec': 0.0,
+        }
+
+    def record_motion_sample(self, msg):
+        with self.recording_lock:
+            if not self.recording_active:
+                return
+
+            now = self.get_clock().now()
+            if self.last_record_sample_time is not None:
+                dt = (now - self.last_record_sample_time).nanoseconds * 1e-9
+                min_interval = 1.0 / max(1.0, self.motion_sample_rate_hz)
+                if dt < min_interval:
+                    return
+
+            waypoint = self.extract_motion_waypoint(msg)
+            if waypoint is None:
+                return
+
+            if self.recording_start_time is None:
+                self.recording_start_time = now
+            self.last_record_sample_time = now
+            waypoint['time_from_start_sec'] = (
+                now - self.recording_start_time
+            ).nanoseconds * 1e-9
+            self.recorded_motion.append(waypoint)
+
+    def start_motion_recording(self):
+        if self.playback_thread and self.playback_thread.is_alive():
+            self.get_logger().warning('Cannot record while playback is running.')
+            return
+        with self.recording_lock:
+            self.recorded_motion.clear()
+            self.recording_active = True
+            self.recording_start_time = None
+            self.last_record_sample_time = None
+        self.get_logger().info('Motion recording started. Press LT again to stop and save.')
+
+    def toggle_motion_recording(self):
+        if self.recording_active:
+            self.stop_motion_recording(save=True)
+        else:
+            self.start_motion_recording()
+
+    def stop_motion_recording(self, save=True):
+        with self.recording_lock:
+            if not self.recording_active:
+                return
+            self.recording_active = False
+            waypoints = [dict(wp) for wp in self.recorded_motion]
+
+        if not save:
+            self.get_logger().info('Motion recording stopped without saving.')
+            return
+
+        if len(waypoints) < 2:
+            self.get_logger().warning(
+                'Need at least 2 motion samples. Press LT to start recording, move the arm, then press LT again to save.'
+            )
+            return
+
+        offset = float(waypoints[0]['time_from_start_sec'])
+        for waypoint in waypoints:
+            waypoint['time_from_start_sec'] = (
+                float(waypoint['time_from_start_sec']) - offset
+            )
+        self.recorded_motion = waypoints
+        self.save_recording()
+        duration = waypoints[-1]['time_from_start_sec']
+        self.get_logger().info(
+            f'Saved {len(waypoints)} motion samples over {duration:.2f}s to {self.recording_file}.'
+        )
+
+    def clear_recorded_motion(self):
+        if self.recording_active:
+            self.stop_motion_recording(save=False)
+        self.recorded_motion.clear()
+        path = Path(self.recording_file)
+        if path.exists():
+            path.unlink()
+        self.get_logger().info('Cleared recorded motion.')
+
+    def toggle_motion_playback(self):
+        if self.playback_thread and self.playback_thread.is_alive():
+            self.playback_stop.set()
+            self.get_logger().info('Playback stop requested.')
+            return
+        self.playback_stop.clear()
+        self.playback_thread = threading.Thread(target=self.play_recorded_motion, daemon=True)
+        self.playback_thread.start()
+
+    def play_recorded_motion(self):
+        if self.recording_active:
+            self.get_logger().warning('Cannot play while recording is active.')
+            return False
+        if not self.recorded_motion:
+            self.load_recording()
+        if len(self.recorded_motion) < 2:
+            self.get_logger().warning('No recorded motion to play. Hold LT to record first.')
+            return False
+
+        self.behavior_busy = True
+        try:
+            return self.execute_recorded_motion(self.recorded_motion)
+        finally:
+            self.behavior_busy = False
+            self.playback_stop.clear()
+
+    def execute_recorded_motion(self, waypoints):
+        trajectory = self.build_recorded_trajectory(waypoints)
+        if not trajectory.points:
+            self.get_logger().warning('Recorded motion is empty.')
+            return False
+
+        self.send_recorded_arm_trajectory(trajectory)
+        self.replay_recorded_gripper(waypoints)
+
+        if self.playback_stop.is_set():
+            self.get_logger().info('Playback stopped.')
+            return False
+        self.get_logger().info('Playback complete.')
+        return True
+
+    def build_recorded_trajectory(self, waypoints):
+        trajectory = JointTrajectory()
+        trajectory.header.stamp = self.get_clock().now().to_msg()
+        trajectory.joint_names = list(self.arm_joints)
+
+        for waypoint in waypoints:
+            positions = waypoint.get('positions_arm', [])
+            if len(positions) != len(self.arm_joints):
+                self.get_logger().warning('Skipping malformed recorded waypoint.')
+                continue
+            tfs = (
+                max(0.0, float(waypoint.get('time_from_start_sec', 0.0)))
+                + self.playback_start_move_duration
+            )
+            point = JointTrajectoryPoint()
+            point.positions = [float(value) for value in positions]
+            point.velocities = [0.0] * len(self.arm_joints)
+            point.accelerations = [0.0] * len(self.arm_joints)
+            point.time_from_start = self.duration_msg(tfs)
+            trajectory.points.append(point)
+
+        return trajectory
+
+    def send_recorded_arm_trajectory(self, trajectory):
+        if self.traj_client.wait_for_server(timeout_sec=0.5):
+            goal_msg = FollowJointTrajectory.Goal()
+            goal_msg.trajectory = trajectory
+            self.traj_client.send_goal_async(goal_msg)
+            self.get_logger().info('Sent recorded arm trajectory to action server.')
+            return True
+
+        self.trajectory_pub.publish(trajectory)
+        self.get_logger().warning(
+            'Trajectory action server unavailable; published recorded motion to controller topic.'
+        )
+        return True
+
+    def replay_recorded_gripper(self, waypoints):
+        start = time.monotonic()
+        last_index = -1
+        total_duration = (
+            float(waypoints[-1].get('time_from_start_sec', 0.0))
+            + self.playback_start_move_duration
+        )
+        while rclpy.ok() and not self.playback_stop.is_set():
+            elapsed = time.monotonic() - start
+            sent_any = False
+            for index, waypoint in enumerate(waypoints):
+                if index <= last_index:
+                    continue
+                target_time = (
+                    float(waypoint.get('time_from_start_sec', 0.0))
+                    + self.playback_start_move_duration
+                )
+                if elapsed < target_time:
+                    break
+                gripper = waypoint.get('gripper')
+                if gripper is not None:
+                    self.send_gripper_goal_async(float(gripper))
+                last_index = index
+                sent_any = True
+            if elapsed >= total_duration + self.playback_finish_margin_sec:
+                return
+            if not sent_any:
+                time.sleep(0.02)
 
     def record_joint_pose(self):
         pose = self.get_current_joint_pose()
@@ -877,7 +1169,6 @@ class FinalProjJoyController(Node):
                 self.saved_joint_motions.append(motion)
                 if len(self.saved_joint_motions) > 20:
                     self.saved_joint_motions = self.saved_joint_motions[-20:]
-                self.save_recordings()
                 self.execute_joint_poses(motion, 1.6)
         finally:
             self.behavior_busy = False
@@ -1047,13 +1338,11 @@ class FinalProjJoyController(Node):
         self.log_recording_counts()
 
     def log_recording_counts(self):
+        status = 'active' if self.recording_active else 'idle'
         self.get_logger().info(
-            'Recordings: '
-            f'{len(self.saved_joint_poses)} joint poses, '
-            f'{len(self.saved_joint_motions)} joint motions, '
-            f'{len(self.saved_ee_poses)} EE poses, '
-            f'current joint motion {len(self.current_joint_motion)} points, '
-            f'current EE sequence {len(self.current_ee_sequence)} targets.'
+            f'Motion recording is {status}; '
+            f'{len(self.recorded_motion)} samples loaded; '
+            f'file: {self.recording_file}'
         )
 
     def clear_current_buffers(self):
@@ -1061,32 +1350,43 @@ class FinalProjJoyController(Node):
         self.current_ee_sequence.clear()
         self.get_logger().info('Cleared current joint motion and EE target buffers.')
 
-    def load_recordings(self):
+    def load_recording(self):
         path = Path(self.recording_file)
         if not path.exists():
             return
         try:
-            data = json.loads(path.read_text(encoding='utf-8'))
+            data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
         except Exception as exc:
             self.get_logger().warning(f'Could not read recording file: {exc}')
             return
-        self.saved_joint_poses = list(data.get('joint_poses', []))
-        self.saved_joint_motions = list(data.get('joint_motions', []))
-        self.saved_ee_poses = list(data.get('ee_poses', []))
+        waypoints = list(data.get('waypoints', []))
+        if len(waypoints) < 2:
+            self.get_logger().warning(f'Recording file has too few waypoints: {path}')
+            return
+        self.recorded_motion = waypoints
+        self.get_logger().info(f'Loaded {len(waypoints)} recorded motion samples from {path}.')
 
-    def save_recordings(self):
+    def save_recording(self):
         path = Path(self.recording_file)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {
-            'joint_poses': self.saved_joint_poses,
-            'joint_motions': self.saved_joint_motions,
-            'ee_poses': self.saved_ee_poses,
+            'version': 1,
+            'kind': 'motion',
+            'arm_joint_names': list(self.arm_joints),
+            'gripper_joint_names': list(self.gripper_joints),
+            'sample_rate_hz': self.motion_sample_rate_hz,
+            'waypoints': self.recorded_motion,
         }
-        path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        path.write_text(yaml.safe_dump(data, sort_keys=False), encoding='utf-8')
+
+    def save_recordings(self):
+        self.save_recording()
 
     def destroy_node(self):
         self.random_dance_stop.set()
         self.pick_task_stop.set()
+        self.playback_stop.set()
+        self.stop_motion_recording(save=False)
         try:
             self.stop_servo()
         except Exception:

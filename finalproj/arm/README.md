@@ -62,6 +62,21 @@ Then launch it with:
 ros2 launch finalproj_openmanipulator_control system.launch.py
 ```
 
+The final-project controller can record and replay arm movement from the
+gamepad. Playback is always available from an existing recording: press the
+right trigger to play or stop the saved motion. Recording is disabled by
+default so you cannot overwrite a recording by accident during normal operation.
+Launch with `recording:=true`, press the left trigger once to start recording,
+and press it again to stop and save. The recording is stored at
+`~/.ros/finalproj_openmanipulator_motion.yaml`.
+
+Recorded playback sends the saved joint positions back through the arm
+trajectory controller. The move into the first recorded pose is slowed by
+`playback_start_move_duration` in `config/controller.yaml`; increase it if the
+arm still approaches the start too aggressively. The velocity-streaming
+experiment is preserved for later in `velocity_playback_reference.py`, but it
+is not active at runtime.
+
 Or with OpenCR:
 
 ```bash
@@ -107,6 +122,19 @@ On this local PC, start only the joystick/controller side:
 ```bash
 cd /home/mkros/robotics/finalproj/arm
 ./run-finalproj-local-teleop.sh
+```
+
+The local joystick helper still asks the arm-side MoveIt Servo node to enter
+joint-jog mode, so start the arm-side launch before starting local teleop.
+
+If local teleop connects to the joystick but does not move the arm, confirm both
+machines use the same `ROS_DOMAIN_ID` and that the local machine can see
+`/servo_node/switch_command_type` and `/servo_node/pause_servo`.
+
+To enable recording/playback on the local joystick side:
+
+```bash
+./run-finalproj-local-teleop.sh recording:=true
 ```
 
 For the official ROBOTIS keyboard teleop instead of the final-project joystick

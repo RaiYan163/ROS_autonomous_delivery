@@ -8,10 +8,14 @@ finalproj_joy_controller:
     dpad_horizontal_axis: 4
     dpad_vertical_axis: 5
     deadzone: 0.18
-    joint_velocity_scale: 0.30
+    joint_velocity_scale: 0.60
     gripper_hold_rate: 0.55
     direct_publish_rate: 50.0
     motion_point_duration: 2.0
+    motion_sample_rate_hz: 20.0
+    playback_finish_margin_sec: 0.5
+    playback_start_move_duration: 3.0
+    recording_enabled: false
 
     base_frame: "world"
     ee_link: "end_effector_link"
@@ -35,18 +39,24 @@ finalproj_joy_controller:
     pick_pregrasp_z: 0.13
     pick_grasp_z: 0.035
 
-    recording_file: "~/.ros/finalproj_openmanipulator_recordings.json"
+    recording_file: "~/.ros/finalproj_openmanipulator_motion.yaml"
 
     button_open_gripper: 4
     button_close_gripper: 5
+    button_record_motion: 6
+    button_play_motion: 7
+    left_trigger_axis: -1
+    right_trigger_axis: -1
+    trigger_threshold: 0.5
+    trigger_release_debounce_sec: 0.25
     button_record_joint: -1
     button_record_ee: -1
-    button_play_joint_pose: 11
+    button_play_joint_pose: -1
     button_toggle_pick_task: 10
-    button_save_motion: 6
-    button_play_all_motions: 7
+    button_save_motion: -1
+    button_play_all_motions: -1
     button_toggle_dance: 9
-    button_play_joint_motion: 12
+    button_play_joint_motion: -1
     button_play_ee_pose: -1
     button_play_ee_sequence: -1
     button_print_status: 8

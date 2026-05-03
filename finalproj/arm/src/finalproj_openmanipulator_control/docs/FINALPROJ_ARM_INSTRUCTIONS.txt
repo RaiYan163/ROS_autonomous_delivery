@@ -6,12 +6,22 @@ OpenManipulator-X stack:
 
 - joystick joint jogging through MoveIt Servo
 - gripper open/close
-- joint pose recording and replay
-- multi-point motion recording and replay
+- continuous joint/gripper motion recording and replay
 - end-effector pose recording through tf2
 - end-effector replay through MoveIt IK
 - random dance behavior
 - autonomous pick-rotate-drop motion using fixed workspace coordinates
+
+Recording/playback controls:
+
+  Press RT to play the saved motion back. Press RT again during playback to request stop.
+  Recording is disabled by default.
+  Launch with recording:=true to enable LT recording.
+  Press LT once to start recording /joint_states samples.
+  Press LT again to stop and save to ~/.ros/finalproj_openmanipulator_motion.yaml.
+  Playback sends saved joint positions through the arm trajectory controller.
+  playback_start_move_duration controls how slowly the arm moves into the
+  first recorded pose before the recorded timing begins.
 
 Recommended launch:
 
