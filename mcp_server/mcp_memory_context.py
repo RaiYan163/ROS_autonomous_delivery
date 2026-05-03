@@ -23,6 +23,7 @@ class RobotState:
     last_initial_pose: str = "(none)"
     last_nav_status: str = "(none)"
     last_snapshot: str = "(none)"
+    last_waypoint_name: str = "(none)"
 
 
 @dataclass
@@ -75,6 +76,8 @@ class MemoryContext:
                     self.state.last_nav_status = val or "(none)"
                 elif key == "last_snapshot":
                     self.state.last_snapshot = val or "(none)"
+                elif key == "last_waypoint_name":
+                    self.state.last_waypoint_name = val or "(none)"
         if section == "history" and hist_buf:
             self._parse_history_lines(hist_buf)
 
@@ -121,6 +124,7 @@ class MemoryContext:
                 f"last_initial_pose: {self.state.last_initial_pose}",
                 f"last_nav_status: {self.state.last_nav_status}",
                 f"last_snapshot: {self.state.last_snapshot}",
+                f"last_waypoint_name: {self.state.last_waypoint_name}",
                 "",
                 "==============================",
                 "NEW USER QUERY",
@@ -152,6 +156,7 @@ class MemoryContext:
                 f"last_initial_pose: {self.state.last_initial_pose}",
                 f"last_nav_status: {self.state.last_nav_status}",
                 f"last_snapshot: {self.state.last_snapshot}",
+                f"last_waypoint_name: {self.state.last_waypoint_name}",
                 "",
             ]
         )
@@ -185,14 +190,56 @@ class MemoryContext:
             if xm and ym and zm:
                 self.state.last_initial_pose = f"x={xm},y={ym},yaw={zm}"
 
+        elif cmd.startswith("CALL execute_navigation_async"):
+            self.state.last_nav_status = "async_started"
+            self.state.last_result = _result_bucket(rep, short_rep)
+
         elif cmd.startswith("CALL execute_navigation"):
             self.state.last_nav_status = _nav_status_from_reply(rep)
             self.state.last_result = _result_bucket(rep, short_rep)
 
         elif cmd.startswith("CALL get_camera_snapshot"):
-            m = re.search(r"Saved snapshot to\s+(\S+)", rep)
+            m = re.search(r"Saved snapshot (?:from COMPRESSED \(\S+\) )?to\s+(\S+)", rep)
             if m:
                 self.state.last_snapshot = m.group(1).strip()
+
+        elif cmd.startswith("CALL navigate_to_saved_location"):
+            wm = _re_first(r"name=([^\s].*?)(?=\s+publish_|$)", cmd)
+            if wm:
+                self.state.last_goal = f"saved_waypoint:{wm.strip()}"
+                self.state.last_waypoint_name = wm.strip()
+                self.state.last_nav_status = _nav_status_from_reply(rep)
+                self.state.last_result = _result_bucket(rep, short_rep)
+
+        elif cmd.startswith("CALL save_current_location"):
+            wm = _re_first(r"name=(\S.+)$", cmd) or _re_first(r"name=(\S+)", cmd)
+            if wm:
+                self.state.last_waypoint_name = wm.strip()
+                self.state.last_result = _result_bucket(rep, short_rep)
+
+        elif cmd.startswith("CALL emergency_stop"):
+            self.state.last_command = "emergency_stop"
+            self.state.last_result = _result_bucket(rep, short_rep)
+
+        elif cmd.startswith("CALL cancel_navigation"):
+            self.state.last_nav_status = "cancel_requested"
+            self.state.last_result = _result_bucket(rep, short_rep)
+
+        elif cmd.startswith("CALL wait_for_navigation_result"):
+            self.state.last_nav_status = _nav_status_from_reply(rep)
+            self.state.last_result = _result_bucket(rep, short_rep)
+
+        elif cmd.startswith(
+            (
+                "CALL start_navigation_launch",
+                "CALL stop_navigation_launch",
+                "CALL start_joystick_teleop_launch",
+                "CALL stop_joystick_teleop_launch",
+                "CALL stop_all_managed_launches",
+            ),
+        ):
+            self.state.last_command = _short_text(cmd.replace("CALL ", "").strip(), 120)
+            self.state.last_result = _result_bucket(rep, short_rep)
 
 
 def _short_text(s: str, max_len: int) -> str:

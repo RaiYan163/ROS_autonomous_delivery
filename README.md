@@ -2,7 +2,7 @@
 
 This is a minimal starter setup with:
 
-- `mcp_server/mcp_server_ros2.py`: MCP server exposing ROS2 tools (stdio)
+- `mcp_server/mcp_server_ros2.py`: MCP server exposing ROS 2 TurtleBot tools (topics, TF, `ros2` CLI wrappers, Nav2, managed launches, shared waypoints JSON) over stdio
 - `mcp_server/mcp_client_openai.py`: OpenAI-based wrapper + sliding-window memory; run as module (see below)
 
 ## 1) Prerequisites

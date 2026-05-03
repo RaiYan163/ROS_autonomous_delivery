@@ -25,18 +25,77 @@ You do **not** need to run `mcp_server/mcp_server_ros2.py` in a second terminal 
 
 ## What the MCP server can do (tools)
 
+The MCP server mirrors the TurtleBot GUI: **topic snapshots**, **`ros2` CLI helpers**, **managed launches** (`ros2 launch`), **Nav2**, **waypoints JSON** (`control_center/config/saved_locations.json`), and **TF**. Unless noted, velocities use **`geometry_msgs/msg/TwistStamped`** on `/cmd_vel`.
+
+**Core**
+
 | Tool | What it does |
 |------|----------------|
-| `publish_message(text)` | Publishes a string on `/chatter` (demo topic). |
-| `get_status()` | Shows configured topic names and where camera snapshots are saved. |
-| `get_camera_snapshot()` | Saves the latest `/camera/image_raw` frame to `temp/mcp_snapshots/*.jpg`. |
-| `teleop_move(direction, duration_sec)` | Sends motion on `/cmd_vel` for a few seconds, then stops. |
-| `get_odometry()` | Prints pose and twist from `/odom`. |
-| `get_navigation_help()` | Short text explaining the Nav2 workflow (initial pose → goal → execute). |
-| `set_navigation_initial_pose(x, y, yaw_deg)` | Publishes `/initialpose` for localization (map frame, meters, degrees). |
-| `set_navigation_goal(x, y, yaw_deg)` | Stores a navigation goal (does not move until you execute). |
-| `get_navigation_state()` | Shows stored initial pose and goal. |
-| `execute_navigation()` | Tells Nav2 to drive to the stored goal (`NavigateToPose`). |
+| `publish_message(text)` | Publishes a string on `/chatter`. |
+| `get_status()` | Topic names, default map YAML, waypoint file path, snapshot dir. |
+| `get_camera_snapshot(use_compressed=false)` | JPEG to `temp/mcp_snapshots/` from raw `/camera/image_raw` or compressed `/image_raw/compressed`. |
+| `teleop_move(direction, duration_sec)` | Timed bursts on `/cmd_vel`, then stop. Directions: `forward`, `back`, `left`, `right`, `stop`. |
+| `emergency_stop(repeats=5)` | Repeated zero velocity on `/cmd_vel`. |
+| `get_odometry()` | Latest `/odom` pose and twist. |
+
+**Robot state**
+
+| Tool | What it does |
+|------|----------------|
+| `get_amcl_pose()` | Latest `/amcl_pose` pose (localized map frame). |
+| `get_battery_status()` | Latest `/battery_state`. |
+| `get_joy_state()` | Latest `/joy` axes/buttons plus GUI-style disconnect if silent >2 s. |
+| `get_lidar_scan(sectors_deg=8, full=false)` | Summarize `/scan` (sectors or sparse full dump when small). |
+| `get_tf_transform(target_frame, source_frame)` | TF2 lookup (`map`, `base_link`, etc.). |
+
+**ROS CLI (same behaviour as GUI Initialisation)**
+
+| Tool | CLI equivalent |
+|------|----------------|
+| `ros2_node_list()` | `ros2 node list` |
+| `ros2_topic_list(filter_regex=null)` | `ros2 topic list` with optional substring filter |
+| `ros2_topic_info(topic)` | `ros2 topic info <topic>` |
+| `ros2_topic_echo_once(topic, timeout_sec=10)` | `ros2 topic echo <topic> --once` |
+| `ros2_topic_hz(topic, sample_seconds=3)` | `ros2 topic hz <topic>` (sample window capped at 10 s). |
+
+**Managed launches**
+
+| Tool | Equivalent GUI action |
+|------|-----------------------|
+| `start_navigation_launch(use_sim_time=false, map_path=null)` | `navigation2.launch.py`; default map `real_map/test_map.yaml`. |
+| `stop_navigation_launch()` | Stop Nav2 launch process group |
+| `start_joystick_teleop_launch()` | `custom_turtlebot_nodes/joystick_teleop.launch.py` |
+| `stop_joystick_teleop_launch()` | Stop teleop launch |
+| `list_managed_launches()` | Alive / exited status |
+| `stop_all_managed_launches()` | Stop every MCP-managed launch |
+
+**Nav2**
+
+| Tool | Notes |
+|------|--------|
+| `get_navigation_help()` | Workflow text (starts Nav2 launch, poses, conflicts with teleop). |
+| `set_navigation_initial_pose(x, y, yaw_deg)` | `/initialpose` (map frame, degrees). |
+| `set_navigation_goal(x, y, yaw_deg=0)` | Store goal — does not drive until execute. |
+| `get_navigation_state()` | Stored initial pose / goal plus async-handle hints. |
+| `execute_navigation()` | **Blocking** `NavigateToPose` for stored goal. |
+| `execute_navigation_async()` | Non-blocking goal with feedback callbacks. |
+| `get_navigation_feedback()` | Distance remaining or finished status. |
+| `wait_for_navigation_result(timeout_sec=120)` | Block for async navigation result. |
+| `cancel_navigation()` | Cancel current **async** goal. |
+| `manual_recovery()` | Cancel async goal + advisory; use joystick if stuck. |
+
+**Waypoints (`saved_locations.json`, shared with GUI)**
+
+| Tool | What it does |
+|------|----------------|
+| `list_saved_locations()` | Full JSON snapshot. |
+| `get_saved_location(name)` | One entry by name. |
+| `save_current_location(name)` | Save current `/amcl_pose`. |
+| `update_saved_location_coords(name, x?, y?, yaw_deg?)` | Partial edit (degrees match JSON yaw). |
+| `update_saved_location_to_current(name)` | Overwrite with current `/amcl_pose`. |
+| `rename_saved_location(old_name, new_name)` | Rename waypoint key. |
+| `delete_saved_location(name)` | Remove entry. |
+| `navigate_to_saved_location(name, publish_initial_pose=false)` | Optionally publish `/initialpose` then blocking goal + navigate. |
 
 **Directions for `teleop_move`:** `forward`, `back`, `left`, `right`, `stop` (duration is ignored for `stop`).
 
