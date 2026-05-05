@@ -75,6 +75,23 @@ class FinalProjJoyController(Node):
         self.arm_joints = list(
             self.declare_parameter('arm_joints', ['joint1', 'joint2', 'joint3', 'joint4']).value
         )
+        default_positions_raw = list(
+            self.declare_parameter(
+                'default_arm_positions',
+                [0.0, -1.0, 1.0, 0.0],
+            ).value
+        )
+        if len(default_positions_raw) != len(self.arm_joints):
+            self.get_logger().warning(
+                f'default_arm_positions length {len(default_positions_raw)} does not match '
+                f'arm_joints ({len(self.arm_joints)}); using all zeros for go-home.'
+            )
+            self.default_arm_pose = {joint: 0.0 for joint in self.arm_joints}
+        else:
+            self.default_arm_pose = {
+                joint: float(value)
+                for joint, value in zip(self.arm_joints, default_positions_raw)
+            }
         self.gripper_joints = list(
             self.declare_parameter(
                 'gripper_joints',
@@ -97,6 +114,9 @@ class FinalProjJoyController(Node):
         self.direct_publish_rate = float(self.declare_parameter('direct_publish_rate', 50.0).value)
         self.motion_point_duration = float(
             self.declare_parameter('motion_point_duration', 2.0).value
+        )
+        self.home_duration = float(
+            self.declare_parameter('home_duration', 4.0).value
         )
         self.recording_file = os.path.expanduser(
             str(
@@ -164,6 +184,7 @@ class FinalProjJoyController(Node):
         self.button_play_all_motions = int(
             self.declare_parameter('button_play_all_motions', 7).value
         )
+        self.button_go_home = int(self.declare_parameter('button_go_home', -1).value)
         self.button_toggle_dance = int(self.declare_parameter('button_toggle_dance', 8).value)
         self.button_toggle_pick_task = int(
             self.declare_parameter('button_toggle_pick_task', 9).value
@@ -312,6 +333,8 @@ class FinalProjJoyController(Node):
             self.run_worker('play joint motion', self.play_last_joint_motion)
         if self.rising_edge(buttons, self.button_save_motion):
             self.save_current_joint_motion()
+        if self.rising_edge(buttons, self.button_go_home):
+            self.run_worker('go home', self.go_to_default_position)
         if self.rising_edge(buttons, self.button_play_all_motions):
             self.run_worker('play all motions', self.play_all_joint_motions)
         if self.rising_edge(buttons, self.button_toggle_dance):
@@ -598,6 +621,11 @@ class FinalProjJoyController(Node):
             if not self.execute_joint_poses(motion, self.motion_point_duration):
                 return False
         return True
+
+    def go_to_default_position(self):
+        pose = dict(self.default_arm_pose)
+        if not self.execute_joint_poses([pose], self.home_duration):
+            self.get_logger().warning('Go to default position failed.')
 
     def play_last_ee_pose(self):
         if not self.saved_ee_poses:

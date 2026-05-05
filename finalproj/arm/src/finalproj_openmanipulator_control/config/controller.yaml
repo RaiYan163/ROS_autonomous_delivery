@@ -1,6 +1,8 @@
 finalproj_joy_controller:
   ros__parameters:
     arm_joints: ["joint1", "joint2", "joint3", "joint4"]
+    # Matches ROBOTIS open_manipulator_x/initial_positions.yaml (home step) used at hardware bringup.
+    default_arm_positions: [0.0, -1.0, 1.0, 0.0]
     gripper_joints: ["gripper_left_joint", "gripper_right_joint_mimic"]
 
     select_joint_buttons: [0, 1, 2, 3]
@@ -12,6 +14,7 @@ finalproj_joy_controller:
     gripper_hold_rate: 0.55
     direct_publish_rate: 50.0
     motion_point_duration: 2.0
+    home_duration: 4.0
 
     base_frame: "world"
     ee_link: "end_effector_link"
@@ -44,7 +47,8 @@ finalproj_joy_controller:
     button_play_joint_pose: 11
     button_toggle_pick_task: 10
     button_save_motion: 6
-    button_play_all_motions: 7
+    button_play_all_motions: -1
+    button_go_home: 7
     button_toggle_dance: 9
     button_play_joint_motion: 12
     button_play_ee_pose: -1

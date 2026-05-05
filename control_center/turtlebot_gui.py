@@ -37,6 +37,7 @@ import json
 import math
 import os
 import queue
+import time
 import signal
 import subprocess
 import sys
@@ -70,7 +71,15 @@ SCRIPT_DIR     = Path(__file__).parent.resolve()
 WORKSPACE_ROOT = SCRIPT_DIR.parent
 LOCATIONS_FILE = SCRIPT_DIR / "config" / "saved_locations.json"
 LOGS_DIR       = SCRIPT_DIR / "logs"
-MAP_YAML       = WORKSPACE_ROOT / "real_map" / "test_map.yaml"
+MAP_YAML                  = WORKSPACE_ROOT / "real_map" / "test_map.yaml"
+ARM_TELEOP_SCRIPT         = WORKSPACE_ROOT / "finalproj" / "arm" / "run-finalproj-local-teleop.sh"
+SAVED_ARM_POSITIONS_FILE  = SCRIPT_DIR / "config" / "saved_arm_positions.json"
+SAVED_ARM_SEQUENCES_FILE  = SCRIPT_DIR / "config" / "saved_arm_sequences.json"
+
+_ARM_JOINTS            = ["joint1", "joint2", "joint3", "joint4"]
+_ARM_DEFAULT_POSITIONS = [0.0, -1.0, 1.0, 0.0]   # ROBOTIS home
+_ARM_GOTO_DURATION_SEC = 4                         # seconds for trajectory
+_ARM_SEQUENCE_DELAY_SEC = 2.0                    # pause between sequence steps (seconds)
 
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
@@ -614,6 +623,50 @@ def make_sep(parent: tk.Widget) -> tk.Frame:
     return tk.Frame(parent, bg=C["surface1"], height=1)
 
 
+def _parse_joint_states_topic_echo(stdout: str) -> dict | None:
+    """
+    Parse ``ros2 topic echo --once /joint_states`` stdout.
+
+    The CLI sometimes prints leading noise (e.g. lost-message counters, tabs,
+    log lines) before the YAML document. Try several slices / ``---`` chunks
+    until we get a dict with ``name`` and ``position`` lists.
+    """
+    import yaml as _yaml
+
+    raw = stdout.strip()
+    if not raw:
+        return None
+
+    candidates: list[str] = [raw]
+    for part in raw.split("---"):
+        p = part.strip()
+        if p:
+            candidates.append(p)
+
+    for marker in ("header:", "\nheader:"):
+        idx = raw.find(marker)
+        if idx >= 0:
+            candidates.append(raw[idx:])
+
+    seen: set[str] = set()
+    for cand in candidates:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        try:
+            data = _yaml.safe_load(cand)
+        except Exception:
+            continue
+        if (
+            isinstance(data, dict)
+            and isinstance(data.get("name"), list)
+            and isinstance(data.get("position"), list)
+            and len(data["name"]) == len(data["position"])
+        ):
+            return data
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main GUI class
 # ─────────────────────────────────────────────────────────────────────────────
@@ -667,8 +720,35 @@ class TeachNavGUI:
         self._mcp_user_q: queue.Queue | None = None
         self._mcp_tk_q: queue.Queue | None = None
         self._mcp_stop: threading.Event | None = None
+
+        # Arm teleop window state
+        self._arm_teleop_win: tk.Toplevel | None = None
+        self._arm_teleop_proc: subprocess.Popen | None = None
+        self._arm_teleop_log_text: tk.Text | None = None
+        self._arm_dot: tk.Label | None = None
+        self._arm_proc_lbl: tk.Label | None = None
+        # Arm saved positions
+        self._arm_positions: dict = {}
+        self._arm_pos_name_var: tk.StringVar | None = None
+        self._arm_pos_dropdown_var: tk.StringVar | None = None
+        self._arm_pos_dropdown: ttk.Combobox | None = None
+        self._arm_env: dict = {}
+        self._arm_sequence: list[str] = []
+        self._arm_sequence_listbox: tk.Listbox | None = None
+        self._arm_play_stop_event: threading.Event | None = None
+        self._arm_active_goal_proc: subprocess.Popen | None = None
+        self._arm_play_thread: threading.Thread | None = None
+        self._arm_saved_sequences: dict[str, list[str]] = {}
+        self._arm_gap_var: tk.StringVar | None = None
+        self._arm_speed_var: tk.IntVar | None = None
+        self._arm_speed_dur_lbl: tk.Label | None = None
+        self._arm_seq_save_name_var: tk.StringVar | None = None
+        self._arm_saved_seq_combo: ttk.Combobox | None = None
+        self._arm_saved_seq_combo_var: tk.StringVar | None = None
         self._setup_window()
         self._load_locations()
+        self._load_arm_positions()
+        self._load_arm_sequences()
         self._build_nav_and_pages()
         self._start_ros()
         self._poll_queue()
@@ -741,6 +821,23 @@ class TeachNavGUI:
             activeforeground=C["base"],
         )
         self._btn_ai_assistant.pack(side="left", padx=(8, 0))
+
+        self._btn_arm_teleop_nav = tk.Button(
+            nav_inner,
+            text="  🦾  Arm Teleop  ",
+            font=FONT_BODY,
+            command=self._open_arm_teleop_window,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=14,
+            pady=6,
+            bg=C["sky"],
+            fg=C["base"],
+            activebackground=C["surface2"],
+            activeforeground=C["base"],
+        )
+        self._btn_arm_teleop_nav.pack(side="left", padx=(8, 0))
 
         self._ros_badge = tk.Label(
             hdr,
@@ -2181,6 +2278,24 @@ class TeachNavGUI:
             self._btn_joy_toggle.config(text="⏵  Enable Joystick",
                                         bg=C["green"], fg=C["base"])
 
+        # Arm teleop status dot (only when the arm window is open)
+        arm_running = (
+            self._arm_teleop_proc is not None
+            and self._arm_teleop_proc.poll() is None
+        )
+        arm_dot = self._arm_dot
+        arm_lbl = self._arm_proc_lbl
+        if arm_dot is not None and arm_lbl is not None:
+            try:
+                if arm_running:
+                    arm_dot.config(fg=C["green"])
+                    arm_lbl.config(text="Arm Teleop: Running", fg=C["green"])
+                else:
+                    arm_dot.config(fg=C["surface2"])
+                    arm_lbl.config(text="Arm Teleop: Stopped", fg=C["subtext"])
+            except tk.TclError:
+                pass
+
         # Navigation Enable/Disable — avoid double-start while stack is running
         if self._proc_alive("nav"):
             self._btn_nav_enable.config(state=tk.DISABLED)
@@ -2802,6 +2917,919 @@ class TeachNavGUI:
             ent.focus_set()
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Arm Teleop window
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Arm saved positions — persistence
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _load_arm_positions(self) -> None:
+        try:
+            if SAVED_ARM_POSITIONS_FILE.exists():
+                with open(SAVED_ARM_POSITIONS_FILE) as f:
+                    self._arm_positions = json.load(f)
+        except Exception:
+            self._arm_positions = {}
+
+    def _save_arm_positions_file(self) -> None:
+        try:
+            SAVED_ARM_POSITIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(SAVED_ARM_POSITIONS_FILE, "w") as f:
+                json.dump(self._arm_positions, f, indent=2)
+        except Exception as exc:
+            self._arm_teleop_log_append(f"[WARNING] Could not save positions file: {exc}\n")
+
+    def _load_arm_sequences(self) -> None:
+        try:
+            if SAVED_ARM_SEQUENCES_FILE.exists():
+                with open(SAVED_ARM_SEQUENCES_FILE) as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self._arm_saved_sequences = {str(k): list(v) for k, v in data.items()}
+                else:
+                    self._arm_saved_sequences = {}
+        except Exception:
+            self._arm_saved_sequences = {}
+
+    def _save_arm_sequences_file(self) -> None:
+        try:
+            SAVED_ARM_SEQUENCES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(SAVED_ARM_SEQUENCES_FILE, "w") as f:
+                json.dump(self._arm_saved_sequences, f, indent=2)
+        except Exception as exc:
+            self._arm_teleop_log_append(f"[WARNING] Could not save sequences file: {exc}\n")
+
+    @staticmethod
+    def _arm_trajectory_time_yaml(seconds: float) -> str:
+        """ROS trajectory ``time_from_start`` as YAML mapping (sec + nanosec)."""
+        sec_i = int(seconds)
+        nan = int(round((seconds - sec_i) * 1e9))
+        if nan >= 1_000_000_000:
+            sec_i += nan // 1_000_000_000
+            nan %= 1_000_000_000
+        return f"{{sec: {sec_i}, nanosec: {nan}}}"
+
+    def _arm_move_duration_from_speed(self, speed: int) -> float:
+        """Higher speed value → shorter trajectory time (snappier). speed ∈ [5,100]."""
+        sp = max(5, min(100, int(speed)))
+        return max(0.35, min(12.0, 100.0 / float(sp)))
+
+    def _refresh_arm_positions_dropdown(self) -> None:
+        cb = self._arm_pos_dropdown
+        if cb is None:
+            return
+        try:
+            if not cb.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        names = ["Default"] + sorted(self._arm_positions.keys())
+        cb["values"] = names
+        cur = self._arm_pos_dropdown_var.get() if self._arm_pos_dropdown_var else ""
+        if cur not in names:
+            if self._arm_pos_dropdown_var:
+                self._arm_pos_dropdown_var.set("Default")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Arm Teleop — save / goto panels & workers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_arm_save_panel(self, parent: tk.Widget) -> tk.Frame:
+        outer, inner = make_panel(parent, "📌  Save Current Position")
+        row = tk.Frame(inner, bg=C["surface0"])
+        row.pack(fill="x")
+        tk.Label(row, text="Name:", font=FONT_BODY, width=6, anchor="w",
+                 bg=C["surface0"], fg=C["subtext"]).pack(side="left")
+        self._arm_pos_name_var = tk.StringVar()
+        entry = tk.Entry(row, textvariable=self._arm_pos_name_var,
+                         font=FONT_BODY, bg=C["mantle"], fg=C["text"],
+                         insertbackground=C["text"], relief="flat", bd=4, width=20)
+        entry.pack(side="left", padx=(0, 6))
+        entry.bind("<Return>", lambda _: self._on_save_arm_position())
+        make_btn(row, "Save Position", self._on_save_arm_position,
+                 color="teal").pack(side="left")
+        return outer
+
+    def _build_arm_positions_panel(self, parent: tk.Widget) -> tk.Frame:
+        outer, inner = make_panel(parent, "🎯  Saved Positions")
+        row = tk.Frame(inner, bg=C["surface0"])
+        row.pack(fill="x")
+        tk.Label(row, text="Select:", font=FONT_BODY, width=6, anchor="w",
+                 bg=C["surface0"], fg=C["subtext"]).pack(side="left")
+        self._arm_pos_dropdown_var = tk.StringVar(value="Default")
+        self._arm_pos_dropdown = ttk.Combobox(
+            row, textvariable=self._arm_pos_dropdown_var,
+            state="readonly", font=FONT_BODY, width=22,
+        )
+        self._arm_pos_dropdown.pack(side="left", padx=(0, 6))
+        make_btn(row, "Go To Position", self._on_goto_arm_position,
+                 color="green").pack(side="left", padx=(0, 6))
+        make_btn(row, "Delete", self._on_delete_arm_position,
+                 color="red").pack(side="left")
+        self._refresh_arm_positions_dropdown()
+        return outer
+
+    def _on_save_arm_position(self) -> None:
+        name = (self._arm_pos_name_var.get() if self._arm_pos_name_var else "").strip()
+        if not name:
+            self._arm_teleop_log_append("[WARNING] Enter a name before saving.\n")
+            return
+        if name.lower() == "default":
+            self._arm_teleop_log_append("[WARNING] 'Default' is reserved — choose a different name.\n")
+            return
+        self._arm_teleop_log_append(f"[INFO] Capturing joint states for '{name}'...\n")
+        threading.Thread(
+            target=self._capture_arm_position_worker, args=(name,), daemon=True
+        ).start()
+
+    def _capture_arm_position_worker(self, name: str) -> None:
+        env = self._arm_env or os.environ.copy()
+        try:
+            result = subprocess.run(
+                ["ros2", "topic", "echo", "--once", "/joint_states"],
+                capture_output=True, text=True, timeout=6, env=env,
+            )
+            raw = result.stdout.strip()
+            if not raw:
+                err = (result.stderr or "").strip()
+                self.root.after(0, lambda e=err: self._arm_teleop_log_append(
+                    "[ERROR] /joint_states returned no data — is arm teleop running?\n"
+                    + (f"[stderr] {e}\n" if e else "")
+                ))
+                return
+            data = _parse_joint_states_topic_echo(raw)
+            if data is None:
+                snippet = raw[:400].replace("\n", "↵")
+                err = (result.stderr or "").strip()
+                self.root.after(0, lambda s=snippet, e=err: self._arm_teleop_log_append(
+                    "[ERROR] Could not parse /joint_states echo as JointState YAML.\n"
+                    f"[hint] First 400 chars: {s}\n"
+                    + (f"[stderr] {e}\n" if e else "")
+                ))
+                return
+            joint_names = data.get("name", [])
+            positions = data.get("position", [])
+            joint_map = {n: float(p) for n, p in zip(joint_names, positions)}
+        except subprocess.TimeoutExpired:
+            self.root.after(0, lambda: self._arm_teleop_log_append(
+                "[ERROR] Timeout reading /joint_states\n"
+            ))
+            return
+        except Exception as exc:
+            self.root.after(0, lambda e=exc: self._arm_teleop_log_append(
+                f"[ERROR] Failed to read joint states: {e}\n"
+            ))
+            return
+
+        saved: dict = {j: joint_map.get(j, 0.0) for j in _ARM_JOINTS}
+        saved["gripper_left_joint"] = joint_map.get("gripper_left_joint", 0.0)
+        self._arm_positions[name] = saved
+        self._save_arm_positions_file()
+
+        summary = "  ".join(f"{k}={v:.3f}" for k, v in saved.items())
+        self.root.after(0, lambda: (
+            self._refresh_arm_positions_dropdown(),
+            self._arm_teleop_log_append(f"[INFO] Saved '{name}': {summary}\n"),
+            self._arm_pos_name_var.set("") if self._arm_pos_name_var else None,
+        ))
+
+    def _on_goto_arm_position(self) -> None:
+        name = (self._arm_pos_dropdown_var.get() if self._arm_pos_dropdown_var else "").strip()
+        if not name:
+            self._arm_teleop_log_append("[WARNING] Select a position first.\n")
+            return
+        move_dur = _ARM_GOTO_DURATION_SEC
+        if self._arm_speed_var is not None:
+            move_dur = self._arm_move_duration_from_speed(self._arm_speed_var.get())
+        self._arm_teleop_log_append(f"[INFO] Moving to '{name}' (≈{move_dur:.2f}s)...\n")
+        threading.Thread(
+            target=self._goto_arm_position_worker, args=(name, move_dur), daemon=True
+        ).start()
+
+    def _arm_kill_active_goal(self) -> None:
+        proc = self._arm_active_goal_proc
+        self._arm_active_goal_proc = None
+        _shutdown_ros_launch_process(proc)
+
+    def _arm_resolve_pose_for_name(self, name: str) -> tuple[dict[str, float], float | None] | None:
+        if name == "Default":
+            joints = {j: p for j, p in zip(_ARM_JOINTS, _ARM_DEFAULT_POSITIONS)}
+            return joints, None
+        data = self._arm_positions.get(name)
+        if data is None:
+            return None
+        joints = {j: float(data[j]) for j in _ARM_JOINTS}
+        gripper = float(data.get("gripper_left_joint", 0.0))
+        return joints, gripper
+
+    def _arm_goto_execute_name(
+        self,
+        name: str,
+        env: dict,
+        stop_event: threading.Event | None,
+        move_duration_sec: float,
+    ) -> bool:
+        """Send arm (+ optional gripper) to named pose. Returns False on stop/timeout/error."""
+        resolved = self._arm_resolve_pose_for_name(name)
+        if resolved is None:
+            self.root.after(
+                0, lambda n=name: self._arm_teleop_log_append(f"[ERROR] Position '{n}' not found.\n"),
+            )
+            return False
+        joints, gripper = resolved
+        positions_list = [joints[j] for j in _ARM_JOINTS]
+        tfs = self._arm_trajectory_time_yaml(move_duration_sec)
+        goal_yaml = (
+            f"{{trajectory: {{joint_names: {_ARM_JOINTS}, "
+            f"points: [{{positions: {positions_list}, "
+            f"velocities: [0.0, 0.0, 0.0, 0.0], "
+            f"time_from_start: {tfs}}}]}}}}"
+        )
+        cmd = [
+            "ros2",
+            "action",
+            "send_goal",
+            "/arm_controller/follow_joint_trajectory",
+            "control_msgs/action/FollowJointTrajectory",
+            goal_yaml,
+        ]
+        kwargs: dict = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "env": env,
+        }
+        if sys.platform != "win32":
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(cmd, **kwargs)
+        self._arm_active_goal_proc = proc
+        deadline = time.monotonic() + float(move_duration_sec) + 15.0
+        try:
+            while True:
+                if stop_event and stop_event.is_set():
+                    _shutdown_ros_launch_process(proc)
+                    self.root.after(
+                        0, lambda: self._arm_teleop_log_append("[INFO] Move cancelled (stop).\n"),
+                    )
+                    return False
+                ret = proc.poll()
+                if ret is not None:
+                    out = ""
+                    if proc.stdout:
+                        out = proc.stdout.read() or ""
+                    self.root.after(
+                        0,
+                        lambda o=out.strip(): self._arm_teleop_log_append(
+                            f"[INFO] Arm result: {o}\n" if o else "[INFO] Arm trajectory finished.\n",
+                        ),
+                    )
+                    if ret != 0:
+                        return False
+                    break
+                if time.monotonic() > deadline:
+                    _shutdown_ros_launch_process(proc)
+                    self.root.after(
+                        0, lambda: self._arm_teleop_log_append("[WARNING] Arm trajectory timed out.\n"),
+                    )
+                    return False
+                time.sleep(0.05)
+        finally:
+            if self._arm_active_goal_proc is proc:
+                self._arm_active_goal_proc = None
+
+        if gripper is not None:
+            gripper_yaml = f"{{command: {{position: {gripper:.4f}, max_effort: 10.0}}}}"
+            gcmd = [
+                "ros2",
+                "action",
+                "send_goal",
+                "/gripper_controller/gripper_cmd",
+                "control_msgs/action/GripperCommand",
+                gripper_yaml,
+            ]
+            gkwargs: dict = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
+                "env": env,
+            }
+            if sys.platform != "win32":
+                gkwargs["start_new_session"] = True
+            gproc = subprocess.Popen(gcmd, **gkwargs)
+            self._arm_active_goal_proc = gproc
+            gdeadline = time.monotonic() + 12.0
+            try:
+                while True:
+                    if stop_event and stop_event.is_set():
+                        _shutdown_ros_launch_process(gproc)
+                        return False
+                    ret = gproc.poll()
+                    if ret is not None:
+                        self.root.after(
+                            0,
+                            lambda g=gripper: self._arm_teleop_log_append(f"[INFO] Gripper → {g:.4f}\n"),
+                        )
+                        return ret == 0
+                    if time.monotonic() > gdeadline:
+                        _shutdown_ros_launch_process(gproc)
+                        self.root.after(
+                            0, lambda: self._arm_teleop_log_append("[WARNING] Gripper timed out.\n"),
+                        )
+                        return False
+                    time.sleep(0.05)
+            finally:
+                if self._arm_active_goal_proc is gproc:
+                    self._arm_active_goal_proc = None
+        return True
+
+    def _goto_arm_position_worker(self, name: str, move_duration_sec: float) -> None:
+        env = self._arm_env or os.environ.copy()
+        self._arm_goto_execute_name(name, env, None, move_duration_sec)
+
+    def _on_delete_arm_position(self) -> None:
+        name = (self._arm_pos_dropdown_var.get() if self._arm_pos_dropdown_var else "").strip()
+        if not name or name == "Default":
+            self._arm_teleop_log_append("[WARNING] Cannot delete 'Default' — it is built-in.\n")
+            return
+        if name not in self._arm_positions:
+            return
+        del self._arm_positions[name]
+        self._save_arm_positions_file()
+        self._refresh_arm_positions_dropdown()
+        self._arm_teleop_log_append(f"[INFO] Deleted position '{name}'.\n")
+
+    # ── Arm sequence (FIFO playback, interruptible) ─────────────────────────
+
+    def _arm_sequence_refresh_listbox(self) -> None:
+        lb = self._arm_sequence_listbox
+        if lb is None:
+            return
+        try:
+            if not lb.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        lb.delete(0, tk.END)
+        for i, name in enumerate(self._arm_sequence, start=1):
+            lb.insert(tk.END, f"{i}. {name}")
+
+    def _on_arm_sequence_add(self) -> None:
+        name = (self._arm_pos_dropdown_var.get() if self._arm_pos_dropdown_var else "").strip()
+        if not name:
+            self._arm_teleop_log_append("[WARNING] Select a position before adding to sequence.\n")
+            return
+        self._arm_sequence.append(name)
+        self._arm_sequence_refresh_listbox()
+        self._arm_teleop_log_append(f"[INFO] Added '{name}' to sequence (bottom = last added).\n")
+
+    def _on_arm_sequence_drop_last(self) -> None:
+        if not self._arm_sequence:
+            self._arm_teleop_log_append("[INFO] Sequence is empty.\n")
+            return
+        removed = self._arm_sequence.pop()
+        self._arm_sequence_refresh_listbox()
+        self._arm_teleop_log_append(f"[INFO] Dropped last from sequence: '{removed}'.\n")
+
+    def _on_arm_sequence_clear(self) -> None:
+        self._arm_sequence.clear()
+        self._arm_sequence_refresh_listbox()
+        self._arm_teleop_log_append("[INFO] Sequence cleared.\n")
+
+    def _on_arm_sequence_stop(self) -> None:
+        ev = self._arm_play_stop_event
+        if ev is not None:
+            ev.set()
+        self._arm_kill_active_goal()
+        self._arm_teleop_log_append("[INFO] Stop sequence — cancelling current move if any.\n")
+
+    def _on_arm_sequence_play(self) -> None:
+        if self._arm_play_thread is not None and self._arm_play_thread.is_alive():
+            self._arm_teleop_log_append("[WARNING] Sequence play is already running.\n")
+            return
+        if not self._arm_sequence:
+            self._arm_teleop_log_append("[WARNING] Sequence is empty — add positions first.\n")
+            return
+        self._arm_play_stop_event = threading.Event()
+        gap_sec, move_sec = self._arm_read_gap_and_move_duration_or_warn()
+        if gap_sec is None or move_sec is None:
+            return
+        self._arm_play_thread = threading.Thread(
+            target=self._arm_sequence_play_worker,
+            args=(gap_sec, move_sec),
+            daemon=True,
+        )
+        self._arm_play_thread.start()
+
+    def _arm_read_gap_and_move_duration_or_warn(self) -> tuple[float | None, float | None]:
+        """Parse pause (s) from entry and move duration from speed slider; log + return (None, None) on error."""
+        if self._arm_gap_var is None or self._arm_speed_var is None:
+            self._arm_teleop_log_append("[ERROR] Timing controls not initialised.\n")
+            return None, None
+        try:
+            gap = float(self._arm_gap_var.get().strip())
+        except ValueError:
+            self._arm_teleop_log_append("[ERROR] Pause between steps is not a valid number.\n")
+            return None, None
+        if gap < 0.0 or gap > 120.0:
+            self._arm_teleop_log_append("[ERROR] Pause must be between 0 and 120 seconds.\n")
+            return None, None
+        move_sec = self._arm_move_duration_from_speed(self._arm_speed_var.get())
+        return gap, move_sec
+
+    def _arm_sequence_play_worker(self, gap_sec: float, move_duration_sec: float) -> None:
+        env = self._arm_env or os.environ.copy()
+        stop_ev = self._arm_play_stop_event
+        if stop_ev is None:
+            return
+        # FIFO: play from first added toward last (top → bottom in the list)
+        order = list(self._arm_sequence)
+        n_steps = len(order)
+        self.root.after(
+            0,
+            lambda g=gap_sec, m=move_duration_sec: self._arm_teleop_log_append(
+                f"[INFO] Playing sequence (FIFO, {n_steps} steps, pause={g:.2f}s, "
+                f"move≈{m:.2f}s)…\n",
+            ),
+        )
+        for idx, name in enumerate(order):
+            if stop_ev.is_set():
+                self.root.after(0, lambda: self._arm_teleop_log_append("[INFO] Sequence stopped.\n"))
+                return
+            self.root.after(
+                0,
+                lambda i=idx + 1, n=n_steps, nm=name: self._arm_teleop_log_append(
+                    f"[INFO] Sequence step {i}/{n}: '{nm}'\n",
+                ),
+            )
+            ok = self._arm_goto_execute_name(name, env, stop_ev, move_duration_sec)
+            if not ok:
+                if stop_ev.is_set():
+                    self.root.after(0, lambda: self._arm_teleop_log_append("[INFO] Sequence aborted.\n"))
+                else:
+                    self.root.after(0, lambda: self._arm_teleop_log_append("[WARNING] Sequence halted on error.\n"))
+                return
+            if idx < n_steps - 1:
+                end_wait = time.monotonic() + gap_sec
+                while time.monotonic() < end_wait:
+                    if stop_ev.is_set():
+                        self.root.after(0, lambda: self._arm_teleop_log_append("[INFO] Sequence stopped during pause.\n"))
+                        return
+                    time.sleep(0.05)
+        self.root.after(0, lambda: self._arm_teleop_log_append("[INFO] Sequence play finished.\n"))
+
+    def _on_arm_speed_moved(self, *_args) -> None:
+        if self._arm_speed_var is None or self._arm_speed_dur_lbl is None:
+            return
+        try:
+            d = self._arm_move_duration_from_speed(self._arm_speed_var.get())
+            self._arm_speed_dur_lbl.config(text=f"≈ {d:.2f} s per move")
+        except tk.TclError:
+            pass
+
+    def _refresh_saved_sequences_combo(self) -> None:
+        cb = self._arm_saved_seq_combo
+        if cb is None:
+            return
+        try:
+            if not cb.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        names = sorted(self._arm_saved_sequences.keys())
+        cb["values"] = names
+        if self._arm_saved_seq_combo_var is not None:
+            cur = self._arm_saved_seq_combo_var.get()
+            if cur not in names:
+                self._arm_saved_seq_combo_var.set(names[0] if names else "")
+
+    def _arm_valid_pose_step_name(self, name: str) -> bool:
+        return name == "Default" or name in self._arm_positions
+
+    def _on_arm_sequence_save(self) -> None:
+        key = (self._arm_seq_save_name_var.get() if self._arm_seq_save_name_var else "").strip()
+        if not key:
+            self._arm_teleop_log_append("[WARNING] Enter a name to save this sequence.\n")
+            return
+        if not self._arm_sequence:
+            self._arm_teleop_log_append("[WARNING] Sequence list is empty — nothing to save.\n")
+            return
+        bad = [n for n in self._arm_sequence if not self._arm_valid_pose_step_name(n)]
+        if bad:
+            self._arm_teleop_log_append(
+                f"[ERROR] Invalid step names (use Default or saved positions): {bad}\n"
+            )
+            return
+        self._arm_saved_sequences[key] = list(self._arm_sequence)
+        self._save_arm_sequences_file()
+        self._refresh_saved_sequences_combo()
+        self._arm_teleop_log_append(f"[INFO] Saved sequence '{key}' ({len(self._arm_sequence)} steps).\n")
+
+    def _on_arm_sequence_load(self) -> None:
+        key = (self._arm_saved_seq_combo_var.get() if self._arm_saved_seq_combo_var else "").strip()
+        if not key:
+            self._arm_teleop_log_append("[WARNING] Select a saved sequence to load.\n")
+            return
+        seq = self._arm_saved_sequences.get(key)
+        if not seq:
+            self._arm_teleop_log_append(f"[ERROR] Unknown sequence '{key}'.\n")
+            return
+        cleaned: list[str] = []
+        skipped: list[str] = []
+        for n in seq:
+            if self._arm_valid_pose_step_name(n):
+                cleaned.append(n)
+            else:
+                skipped.append(n)
+        self._arm_sequence = cleaned
+        self._arm_sequence_refresh_listbox()
+        self._arm_teleop_log_append(f"[INFO] Loaded sequence '{key}' ({len(cleaned)} steps).\n")
+        if skipped:
+            self._arm_teleop_log_append(f"[WARNING] Skipped unknown steps: {skipped}\n")
+
+    def _build_arm_sequence_panel(self, parent: tk.Widget) -> tk.Frame:
+        outer, inner = make_panel(parent, "🔁  Position sequence (FIFO play)")
+        hint = tk.Label(
+            inner,
+            text="Build top→bottom (FIFO). Set pause between steps and arm move speed, then Play.",
+            font=FONT_SMALL,
+            bg=C["surface0"],
+            fg=C["overlay0"],
+            wraplength=760,
+            justify="left",
+        )
+        hint.pack(anchor="w", pady=(0, 6))
+
+        # Timing: pause + speed slider
+        self._arm_gap_var = tk.StringVar(value=str(_ARM_SEQUENCE_DELAY_SEC))
+        self._arm_speed_var = tk.IntVar(value=25)
+
+        timing = tk.Frame(inner, bg=C["surface0"])
+        timing.pack(fill="x", pady=(0, 6))
+        tk.Label(timing, text="Pause between steps (s):", font=FONT_BODY, bg=C["surface0"],
+                 fg=C["subtext"]).pack(side="left")
+        tk.Entry(
+            timing, textvariable=self._arm_gap_var, font=FONT_MONO, width=8,
+            bg=C["mantle"], fg=C["text"], insertbackground=C["text"], relief="flat", bd=4,
+        ).pack(side="left", padx=(6, 18))
+
+        tk.Label(timing, text="Move speed:", font=FONT_BODY, bg=C["surface0"],
+                 fg=C["subtext"]).pack(side="left")
+        spd = tk.Scale(
+            timing,
+            variable=self._arm_speed_var,
+            from_=5,
+            to=100,
+            orient=tk.HORIZONTAL,
+            resolution=1,
+            length=220,
+            showvalue=1,
+            font=FONT_SMALL,
+            bg=C["surface0"],
+            fg=C["text"],
+            troughcolor=C["mantle"],
+            highlightthickness=0,
+            command=lambda _v: self._on_arm_speed_moved(),
+        )
+        spd.pack(side="left", padx=(6, 6))
+        self._arm_speed_dur_lbl = tk.Label(
+            timing, text="", font=FONT_SMALL, bg=C["surface0"], fg=C["sky"],
+        )
+        self._arm_speed_dur_lbl.pack(side="left")
+        self._on_arm_speed_moved()
+
+        lb_frame = tk.Frame(inner, bg=C["surface0"])
+        lb_frame.pack(fill="both", expand=True, pady=(0, 6))
+        self._arm_sequence_listbox = tk.Listbox(
+            lb_frame,
+            font=FONT_MONO,
+            height=5,
+            bg=C["mantle"],
+            fg=C["text"],
+            selectbackground=C["surface1"],
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+        )
+        self._arm_sequence_listbox.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(lb_frame, command=self._arm_sequence_listbox.yview)
+        sb.pack(side="right", fill="y")
+        self._arm_sequence_listbox.config(yscrollcommand=sb.set)
+        self._arm_sequence_refresh_listbox()
+
+        row1 = tk.Frame(inner, bg=C["surface0"])
+        row1.pack(fill="x", pady=(0, 4))
+        make_btn(row1, "Add to sequence", self._on_arm_sequence_add, color="teal").pack(
+            side="left", padx=(0, 6)
+        )
+        make_btn(row1, "Drop last", self._on_arm_sequence_drop_last, color="orange").pack(
+            side="left", padx=(0, 6)
+        )
+        make_btn(row1, "Clear sequence", self._on_arm_sequence_clear, color="gray").pack(side="left")
+
+        row_save = tk.Frame(inner, bg=C["surface0"])
+        row_save.pack(fill="x", pady=(0, 4))
+        tk.Label(row_save, text="Seq name:", font=FONT_BODY, bg=C["surface0"],
+                 fg=C["subtext"]).pack(side="left")
+        self._arm_seq_save_name_var = tk.StringVar()
+        tk.Entry(
+            row_save, textvariable=self._arm_seq_save_name_var, font=FONT_BODY, width=16,
+            bg=C["mantle"], fg=C["text"], insertbackground=C["text"], relief="flat", bd=4,
+        ).pack(side="left", padx=(0, 6))
+        make_btn(row_save, "Save sequence", self._on_arm_sequence_save, color="teal").pack(side="left")
+
+        row_load = tk.Frame(inner, bg=C["surface0"])
+        row_load.pack(fill="x", pady=(0, 6))
+        tk.Label(row_load, text="Saved:", font=FONT_BODY, bg=C["surface0"],
+                 fg=C["subtext"]).pack(side="left")
+        self._arm_saved_seq_combo_var = tk.StringVar()
+        self._arm_saved_seq_combo = ttk.Combobox(
+            row_load,
+            textvariable=self._arm_saved_seq_combo_var,
+            state="readonly",
+            font=FONT_BODY,
+            width=22,
+        )
+        self._arm_saved_seq_combo.pack(side="left", padx=(0, 6))
+        make_btn(row_load, "Load sequence", self._on_arm_sequence_load, color="blue").pack(side="left")
+        self._refresh_saved_sequences_combo()
+
+        row2 = tk.Frame(inner, bg=C["surface0"])
+        row2.pack(fill="x")
+        make_btn(row2, "▶  Play sequence", self._on_arm_sequence_play, color="green").pack(
+            side="left", padx=(0, 6)
+        )
+        make_btn(row2, "■  Stop sequence", self._on_arm_sequence_stop, color="red").pack(side="left")
+        return outer
+
+    def _open_arm_teleop_window(self) -> None:
+        """If the arm teleop window already exists, just raise it; otherwise open config dialog."""
+        w = self._arm_teleop_win
+        if w is not None:
+            try:
+                if w.winfo_exists():
+                    w.lift()
+                    w.focus_force()
+                    return
+            except tk.TclError:
+                self._arm_teleop_win = None
+
+        # ── Config dialog ────────────────────────────────────────────────────
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Arm Teleop — Configuration")
+        dlg.configure(bg=C["base"])
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=C["crust"])
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="  🦾  Arm Teleop — Launch Configuration",
+                 font=FONT_HEADER, bg=C["crust"], fg=C["sky"],
+                 pady=10, padx=10).pack(side="left")
+
+        body = tk.Frame(dlg, bg=C["base"], padx=20, pady=16)
+        body.pack(fill="both", expand=True)
+
+        def field_row(parent, label_text, default_val):
+            row = tk.Frame(parent, bg=C["base"])
+            row.pack(fill="x", pady=6)
+            tk.Label(row, text=label_text, font=FONT_BODY, width=22, anchor="w",
+                     bg=C["base"], fg=C["subtext"]).pack(side="left")
+            var = tk.StringVar(value=default_val)
+            entry = tk.Entry(row, textvariable=var, font=FONT_MONO,
+                             bg=C["mantle"], fg=C["text"],
+                             insertbackground=C["text"], relief="flat", bd=4, width=24)
+            entry.pack(side="left")
+            return var
+
+        domain_var = field_row(body, "ROS Domain ID:", str(ROS_DOMAIN_ID))
+        model_var  = field_row(body, "TURTLEBOT3_MODEL:", TURTLEBOT3_MODEL)
+        rmw_var    = field_row(body, "RMW_IMPLEMENTATION:", RMW_IMPLEMENTATION)
+
+        tk.Frame(body, bg=C["surface1"], height=1).pack(fill="x", pady=(10, 4))
+
+        btn_row = tk.Frame(body, bg=C["base"])
+        btn_row.pack(fill="x", pady=(6, 0))
+
+        def _on_start():
+            domain = domain_var.get().strip()
+            model  = model_var.get().strip()
+            rmw    = rmw_var.get().strip()
+            dlg.destroy()
+            self._build_arm_teleop_window(domain, model, rmw)
+
+        make_btn(btn_row, "Start", _on_start, color="green").pack(side="right", padx=(6, 0))
+        make_btn(btn_row, "Cancel", dlg.destroy, color="gray").pack(side="right")
+
+        dlg.bind("<Return>", lambda _: _on_start())
+        dlg.bind("<Escape>", lambda _: dlg.destroy())
+
+        dlg.update_idletasks()
+        pw, ph = self.root.winfo_x(), self.root.winfo_y()
+        rw, rh = self.root.winfo_width(), self.root.winfo_height()
+        dw, dh = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        dlg.geometry(f"+{pw + (rw - dw) // 2}+{ph + (rh - dh) // 2}")
+
+    def _build_arm_teleop_window(self, domain: str, model: str, rmw: str) -> None:
+        """Open the main arm teleop Toplevel window."""
+        # Store env for save/goto workers
+        self._arm_env = os.environ.copy()
+        self._arm_env["ROS_DOMAIN_ID"]      = domain
+        self._arm_env["TURTLEBOT3_MODEL"]   = model
+        self._arm_env["RMW_IMPLEMENTATION"] = rmw
+
+        self._arm_sequence = []
+        self._arm_play_stop_event = None
+        self._arm_play_thread = None
+
+        win = tk.Toplevel(self.root)
+        self._arm_teleop_win = win
+        win.title("Arm Teleop — OpenManipulator-X")
+        win.configure(bg=C["base"])
+        win.geometry("880x940")
+        win.minsize(700, 720)
+        win.protocol("WM_DELETE_WINDOW", self._close_arm_teleop_window)
+
+        # ── Header ──────────────────────────────────────────────────────────
+        hdr = tk.Frame(win, bg=C["crust"])
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="  🦾  Arm Teleop — OpenManipulator-X",
+                 font=FONT_TITLE, bg=C["crust"], fg=C["sky"],
+                 padx=10, pady=10).pack(side="left")
+        tk.Label(hdr,
+                 text=f"domain={domain}  model={model}  rmw={rmw}",
+                 font=FONT_SMALL, bg=C["crust"], fg=C["overlay0"],
+                 padx=10, pady=10).pack(side="left")
+
+        # ── Controls ────────────────────────────────────────────────────────
+        ctrl_outer, ctrl_inner = make_panel(win, "⚙   Teleop Control")
+        ctrl_outer.pack(fill="x", padx=10, pady=(10, 4))
+
+        btn_row = tk.Frame(ctrl_inner, bg=C["surface0"])
+        btn_row.pack(fill="x", pady=(0, 6))
+        self._btn_arm_start = make_btn(btn_row, "▶  Start Teleop",
+                                       lambda: self._start_arm_teleop(domain, model, rmw),
+                                       color="green")
+        self._btn_arm_start.pack(side="left", padx=(0, 6))
+        self._btn_arm_stop = make_btn(btn_row, "■  Stop Teleop",
+                                      self._stop_arm_teleop, color="orange")
+        self._btn_arm_stop.pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "✕  Close",
+                 self._close_arm_teleop_window, color="red").pack(side="left")
+
+        make_sep(ctrl_inner).pack(fill="x", pady=(0, 5))
+
+        status_row = tk.Frame(ctrl_inner, bg=C["surface0"])
+        status_row.pack(fill="x")
+        self._arm_dot = make_dot(status_row)
+        self._arm_dot.pack(side="left")
+        self._arm_proc_lbl = tk.Label(status_row, text="Arm Teleop: Stopped",
+                                      font=FONT_SMALL, bg=C["surface0"], fg=C["subtext"])
+        self._arm_proc_lbl.pack(side="left", padx=(2, 0))
+
+        # ── Save current position ────────────────────────────────────────────
+        self._build_arm_save_panel(win).pack(fill="x", padx=10, pady=(0, 4))
+
+        # ── Saved positions ──────────────────────────────────────────────────
+        self._build_arm_positions_panel(win).pack(fill="x", padx=10, pady=(0, 4))
+
+        # ── Sequence (FIFO play) ─────────────────────────────────────────────
+        self._build_arm_sequence_panel(win).pack(fill="x", padx=10, pady=(0, 4))
+
+        # ── Teleop log ───────────────────────────────────────────────────────
+        log_outer, log_inner = make_panel(win, "📋  Teleop Log")
+        log_outer.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        log_inner.rowconfigure(0, weight=1)
+        log_inner.columnconfigure(0, weight=1)
+
+        self._arm_teleop_log_text = tk.Text(
+            log_inner,
+            font=FONT_MONO,
+            bg=C["mantle"], fg=C["text"],
+            insertbackground=C["text"],
+            relief="flat", bd=0,
+            wrap="word",
+            state="disabled",
+        )
+        self._arm_teleop_log_text.grid(row=0, column=0, sticky="nsew")
+
+        sb = ttk.Scrollbar(log_inner, command=self._arm_teleop_log_text.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self._arm_teleop_log_text.config(yscrollcommand=sb.set)
+
+        # ── Footer ──────────────────────────────────────────────────────────
+        footer = tk.Frame(win, bg=C["crust"])
+        footer.pack(side="bottom", fill="x")
+        make_btn(footer, "Close", self._close_arm_teleop_window,
+                 color="red").pack(side="right", padx=(8, 12), pady=(8, 10))
+
+        self._arm_teleop_log_append(f"[INFO] Arm Teleop window opened "
+                                    f"(domain={domain} model={model} rmw={rmw})\n")
+        self._arm_teleop_log_append(
+            f"[INFO] Script: {ARM_TELEOP_SCRIPT}\n"
+            "[INFO] Press 'Start Teleop' to launch.\n"
+        )
+
+    def _arm_teleop_log_append(self, text: str) -> None:
+        """Thread-safe append to the arm teleop log widget."""
+        w = self._arm_teleop_log_text
+        if w is None:
+            return
+        try:
+            if not w.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        w.config(state="normal")
+        w.insert("end", text)
+        w.see("end")
+        w.config(state="disabled")
+
+    def _start_arm_teleop(self, domain: str, model: str, rmw: str) -> None:
+        if self._arm_teleop_proc is not None and self._arm_teleop_proc.poll() is None:
+            self._arm_teleop_log_append("[WARNING] Arm teleop is already running.\n")
+            return
+        if not ARM_TELEOP_SCRIPT.exists():
+            self._arm_teleop_log_append(
+                f"[ERROR] Script not found: {ARM_TELEOP_SCRIPT}\n"
+                "[ERROR] Make sure the arm workspace is in the expected location.\n"
+            )
+            return
+        env = os.environ.copy()
+        env["ROS_DOMAIN_ID"]      = domain
+        env["TURTLEBOT3_MODEL"]   = model
+        env["RMW_IMPLEMENTATION"] = rmw
+        try:
+            kwargs: dict = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "env": env,
+                "text": True,
+                "bufsize": 1,
+            }
+            if sys.platform != "win32":
+                kwargs["start_new_session"] = True
+            self._arm_teleop_proc = subprocess.Popen(
+                [str(ARM_TELEOP_SCRIPT)], **kwargs
+            )
+        except OSError as exc:
+            self._arm_teleop_log_append(f"[ERROR] Failed to start: {exc}\n")
+            return
+
+        self._arm_teleop_log_append(
+            f"[INFO] Launching: {ARM_TELEOP_SCRIPT.name}  "
+            f"(PID {self._arm_teleop_proc.pid})\n"
+        )
+        threading.Thread(
+            target=self._read_arm_teleop_output,
+            daemon=True,
+        ).start()
+
+    def _read_arm_teleop_output(self) -> None:
+        proc = self._arm_teleop_proc
+        if proc is None or proc.stdout is None:
+            return
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                if not line:
+                    break
+                self.root.after(0, lambda l=line: self._arm_teleop_log_append(l))
+        except (OSError, ValueError):
+            pass
+        self.root.after(0, lambda: self._arm_teleop_log_append(
+            "\n[INFO] Arm teleop process ended.\n"
+        ))
+
+    def _stop_arm_teleop(self) -> None:
+        proc = self._arm_teleop_proc
+        self._arm_teleop_proc = None
+        _shutdown_ros_launch_process(proc)
+        self._arm_teleop_log_append("[INFO] Stop signal sent to arm teleop.\n")
+
+    def _close_arm_teleop_window(self) -> None:
+        self._on_arm_sequence_stop()
+        self._arm_play_thread = None
+        self._arm_play_stop_event = None
+        self._arm_sequence_listbox = None
+        self._arm_gap_var = None
+        self._arm_speed_var = None
+        self._arm_speed_dur_lbl = None
+        self._arm_seq_save_name_var = None
+        self._arm_saved_seq_combo = None
+        self._arm_saved_seq_combo_var = None
+        self._stop_arm_teleop()
+        win = self._arm_teleop_win
+        self._arm_teleop_win = None
+        self._arm_teleop_log_text = None
+        self._arm_dot = None
+        self._arm_proc_lbl = None
+        if win is not None:
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Clean shutdown
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -2817,6 +3845,11 @@ class TeachNavGUI:
 
         try:
             self._close_ai_assistant_window()
+        except BaseException:
+            pass
+
+        try:
+            self._close_arm_teleop_window()
         except BaseException:
             pass
 

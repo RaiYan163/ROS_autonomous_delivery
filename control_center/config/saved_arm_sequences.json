@@ -1,0 +1,13 @@
+{
+  "pick_drop_cycle": [
+    "Default",
+    "pick_pre",
+    "pick",
+    "grab",
+    "drop_pre",
+    "drop",
+    "release",
+    "drop_pre",
+    "Default"
+  ]
+}
