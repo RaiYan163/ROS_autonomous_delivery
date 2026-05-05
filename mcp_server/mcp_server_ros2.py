@@ -288,6 +288,7 @@ class TurtleBotMcpNode(Node):
         self.declare_parameter("teleop_linear", 0.2)
         self.declare_parameter("teleop_angular", 0.8)
         self.declare_parameter("teleop_rate_hz", 20.0)
+        self.declare_parameter("teleop_sequence_max_steps", 24)
         self.declare_parameter("initial_pose_topic", "/initialpose")
         self.declare_parameter("navigate_to_pose_action", "/navigate_to_pose")
         self.declare_parameter("default_navigation_map", str(default_map))
@@ -308,6 +309,9 @@ class TurtleBotMcpNode(Node):
         self._teleop_linear = float(self.get_parameter("teleop_linear").value)
         self._teleop_angular = float(self.get_parameter("teleop_angular").value)
         self._teleop_rate_hz = float(self.get_parameter("teleop_rate_hz").value)
+        self._teleop_sequence_max_steps = int(
+            self.get_parameter("teleop_sequence_max_steps").value
+        )
         self._initial_pose_topic = str(self.get_parameter("initial_pose_topic").value)
         self._navigate_action_name = str(
             self.get_parameter("navigate_to_pose_action").value
@@ -455,20 +459,42 @@ class TurtleBotMcpNode(Node):
             time.sleep(period)
         return f"Published {n} zero TwistStamped on {self._cmd_topic}."
 
-    def teleop_for_duration(self, direction: str, duration_sec: float) -> str:
+    def teleop_for_duration(
+        self,
+        direction: str,
+        duration_sec: float,
+        linear_speed: float | None = None,
+        angular_speed: float | None = None,
+        publish_hz: float | None = None,
+    ) -> str:
         direction = direction.strip().lower()
         d = max(0.05, min(float(duration_sec), 15.0))
-        lin = self._teleop_linear
-        ang = self._teleop_angular
+        rate = float(self._teleop_rate_hz)
+        if publish_hz is not None and math.isfinite(float(publish_hz)):
+            rate = abs(float(publish_hz))
+        rate = max(1.0, min(rate, 50.0))
+        period = 1.0 / rate
+        lin_mag = float(self._teleop_linear)
+        ang_mag = float(self._teleop_angular)
+        if linear_speed is not None and math.isfinite(float(linear_speed)):
+            v = abs(float(linear_speed))
+            if v >= 1e-9:
+                lin_mag = v
+        if angular_speed is not None and math.isfinite(float(angular_speed)):
+            v = abs(float(angular_speed))
+            if v >= 1e-9:
+                ang_mag = v
+        lin_mag = max(1e-4, min(lin_mag, 0.6))
+        ang_mag = max(1e-4, min(ang_mag, 2.0))
 
         if direction in ("forward", "fwd", "f"):
-            lx, az = lin, 0.0
+            lx, az = lin_mag, 0.0
         elif direction in ("back", "backward", "rev", "b"):
-            lx, az = -lin, 0.0
+            lx, az = -lin_mag, 0.0
         elif direction in ("left", "l", "turn_left"):
-            lx, az = 0.0, ang
+            lx, az = 0.0, ang_mag
         elif direction in ("right", "r", "turn_right"):
-            lx, az = 0.0, -ang
+            lx, az = 0.0, -ang_mag
         elif direction in ("stop", "halt"):
             self.publish_twist(0.0, 0.0)
             return "Sent stop (zero cmd_vel)."
@@ -478,7 +504,6 @@ class TurtleBotMcpNode(Node):
                 "Use forward, back, left, right, or stop."
             )
 
-        period = 1.0 / max(1.0, self._teleop_rate_hz)
         end = time.time() + d
         while time.time() < end:
             self.publish_twist(lx, az)
@@ -486,9 +511,48 @@ class TurtleBotMcpNode(Node):
 
         self.publish_twist(0.0, 0.0)
         return (
-            f"Teleop {direction} for {d:.2f}s on {self._cmd_topic} "
+            f"Teleop {direction} for {d:.2f}s on {self._cmd_topic} @ {rate:.1f}Hz "
             f"(linear_x={lx:.3f}, angular_z={az:.3f}), then stopped."
         )
+
+    def teleop_sequence_run(self, steps_json: str) -> str:
+        """Run several timed teleop segments in one MCP action (open-loop)."""
+        try:
+            data = json.loads(steps_json.strip())
+        except json.JSONDecodeError as exc:
+            return f"Invalid steps_json (not JSON): {exc}"
+        if not isinstance(data, list):
+            return "steps_json must be a JSON array of step objects"
+        if len(data) < 1:
+            return "steps_json array is empty"
+        if len(data) > self._teleop_sequence_max_steps:
+            return f"Too many steps (max {self._teleop_sequence_max_steps})"
+
+        lines: list[str] = []
+        for i, step in enumerate(data):
+            if not isinstance(step, dict):
+                return "\n".join(lines) + f"\nStep {i + 1} is not a JSON object."
+            direction = str(step.get("direction", "")).strip()
+            try:
+                d = float(step.get("duration_sec", 2.0))
+            except (TypeError, ValueError):
+                return "\n".join(lines) + f"\nStep {i + 1}: invalid duration_sec."
+            lin_raw = step.get("linear_speed")
+            ang_raw = step.get("angular_speed")
+            pub_raw = step.get("publish_hz")
+            lin = float(lin_raw) if lin_raw is not None else None
+            ang = float(ang_raw) if ang_raw is not None else None
+            pub = float(pub_raw) if pub_raw is not None else None
+            try:
+                r = self.teleop_for_duration(direction, d, lin, ang, pub)
+            except Exception as exc:  # noqa: BLE001
+                return "\n".join(lines) + (
+                    f"\nStep {i + 1} raised {type(exc).__name__}: {exc}"
+                )
+            lines.append(f"[{i + 1}/{len(data)}] {r}")
+            if "unknown direction" in r.lower():
+                return "\n".join(lines) + f"\nAborted at step {i + 1} (bad direction)."
+        return "\n".join(lines) + f"\nSequence complete ({len(data)} segments)."
 
     def save_camera_snapshot(self, use_compressed: bool = False) -> str:
         with self._lock:
@@ -1263,12 +1327,34 @@ def get_camera_snapshot(use_compressed: bool = False) -> str:
 
 
 @mcp.tool()
-def teleop_move(direction: str, duration_sec: float) -> str:
+def teleop_move(
+    direction: str,
+    duration_sec: float,
+    linear_speed: float | None = None,
+    angular_speed: float | None = None,
+    publish_hz: float | None = None,
+) -> str:
     """
     Publish /cmd_vel TwistStamped for duration then stop.
     Directions: forward | back | left | right | stop
+    Optional linear_speed (m/s) for forward/back; angular_speed (rad/s) for left/right.
+    Optional publish_hz overrides cmd_vel burst rate for this move (1–50); omit for teleop_rate_hz param.
+    Omitted speeds use ROS params teleop_linear / teleop_angular (defaults 0.2 / 0.8).
     """
-    return _bridge.teleop_for_duration(direction, duration_sec)
+    return _bridge.teleop_for_duration(
+        direction, duration_sec, linear_speed, angular_speed, publish_hz
+    )
+
+
+@mcp.tool()
+def teleop_sequence(steps_json: str) -> str:
+    """
+    Chained timed teleop: steps_json is a JSON array of objects with keys
+    direction (forward|back|left|right|stop), duration_sec, and optional
+    linear_speed, angular_speed, publish_hz per step (same semantics as teleop_move).
+    Open-loop: geometry is approximate (odometry not closed-loop).
+    """
+    return _bridge.teleop_sequence_run(steps_json)
 
 
 @mcp.tool()

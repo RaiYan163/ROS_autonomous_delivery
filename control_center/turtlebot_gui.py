@@ -246,6 +246,7 @@ AI_ASSISTANT_TOOL_CATALOG: list[tuple[str, str]] = [
     ("stop_joystick_teleop_launch", "Stop managed joystick launch."),
     ("stop_navigation_launch", "Stop managed Nav2 launch."),
     ("teleop_move", "Timed /cmd_vel — direction, duration_sec, optional linear_speed, angular_speed, publish_hz (MCP tool)."),
+    ("teleop_sequence", "Chained timed teleop via JSON steps (squares, multi-segment motion)."),
     ("update_saved_location_coords", "Patch x/y/yaw_deg in waypoint JSON."),
     ("update_saved_location_to_current", "Overwrite waypoint with current AMCL pose."),
     ("wait_for_navigation_result", "Block until async NavigateToPose result."),
@@ -2397,8 +2398,11 @@ class TeachNavGUI:
                     _u, reply = msg[1], msg[2]
                     routed = msg[3].strip() if len(msg) >= 4 else ""
                     self._ai_append_chat("assistant", reply)
-                    if routed.startswith("CALL "):
-                        self._ai_append_mcp_tool_calls_line(routed)
+                    if routed.startswith("CALL ") or routed.startswith("TASK_PLAN "):
+                        shown = routed.strip()
+                        if len(shown) > 1200:
+                            shown = shown[:1197] + "..."
+                        self._ai_append_mcp_tool_calls_line(shown)
                     self._ai_append_tool_log(
                         "INFO",
                         f"reply received ({len(str(reply))} chars)",
@@ -2808,7 +2812,7 @@ class TeachNavGUI:
         w.config(state="disabled")
 
     def _ai_append_mcp_tool_calls_line(self, call_line: str) -> None:
-        """Append one router ``CALL …`` line with local timestamp (matches memory/audit format)."""
+        """Append one router ``CALL …`` or ``TASK_PLAN …`` line with local timestamp."""
         w = self._ai_mcp_tool_calls_text
         if w is None:
             return

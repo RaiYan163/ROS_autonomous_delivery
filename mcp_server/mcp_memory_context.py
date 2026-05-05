@@ -1,18 +1,23 @@
 """
-Sliding-window conversation memory + compact robot state for the MCP client.
+Sliding-window conversation memory + recent MCP router ``CALL …`` tail + robot state.
 
-Persists to memory_context.txt at workspace root (human-readable).
+``memory_context.txt`` (workspace root) stores RECENT HISTORY, RECENT MCP TOOL CALLS,
+and ROBOT STATE. ``mcp_tool_calls.log`` is an append-only audit of MCP invocations only.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 
 MAX_EXCHANGES = 6
+MAX_RECENT_MCP_TOOL_CALLS = 24
 FILE_NAME = "memory_context.txt"
+# Append-only audit of MCP ``CALL …`` routing lines at workspace root.
+TOOL_AUDIT_LOG_NAME = "mcp_tool_calls.log"
 
 
 @dataclass
@@ -28,14 +33,16 @@ class RobotState:
 
 @dataclass
 class MemoryContext:
-    """Recent USER/ASSISTANT pairs + robot state; load/save as TXT."""
+    """Recent USER/ASSISTANT pairs + MCP tool-invocation tail + robot state."""
 
     path: Path
     exchanges: list[tuple[str, str]] = field(default_factory=list)
+    recent_mcp_calls: list[str] = field(default_factory=list)
     state: RobotState = field(default_factory=RobotState)
 
     def load(self) -> None:
         self.exchanges = []
+        self.recent_mcp_calls = []
         self.state = RobotState()
         if not self.path.is_file():
             return
@@ -45,6 +52,7 @@ class MemoryContext:
             return
         section: str | None = None
         hist_buf: list[str] = []
+        tools_buf: list[str] = []
         for line in text.splitlines():
             s = line.strip()
             if s.startswith("====") and len(s) >= 4:
@@ -53,13 +61,23 @@ class MemoryContext:
                 section = "history"
                 hist_buf = []
                 continue
+            if s == "RECENT MCP TOOL CALLS":
+                if section == "history" and hist_buf:
+                    self._parse_history_lines(hist_buf)
+                section = "tool_calls"
+                tools_buf = []
+                continue
             if s == "ROBOT STATE":
                 if section == "history" and hist_buf:
                     self._parse_history_lines(hist_buf)
+                elif section == "tool_calls" and tools_buf:
+                    self._parse_tool_calls_lines(tools_buf)
                 section = "state"
                 continue
             if section == "history":
                 hist_buf.append(line)
+            elif section == "tool_calls":
+                tools_buf.append(line)
             elif section == "state" and ":" in line:
                 key, _, val = line.partition(":")
                 key = key.strip()
@@ -80,6 +98,8 @@ class MemoryContext:
                     self.state.last_waypoint_name = val or "(none)"
         if section == "history" and hist_buf:
             self._parse_history_lines(hist_buf)
+        elif section == "tool_calls" and tools_buf:
+            self._parse_tool_calls_lines(tools_buf)
 
     def _parse_history_lines(self, lines: list[str]) -> None:
         cur_user: str | None = None
@@ -99,6 +119,37 @@ class MemoryContext:
         while len(self.exchanges) > MAX_EXCHANGES:
             self.exchanges.pop(0)
 
+    def _parse_tool_calls_lines(self, lines: list[str]) -> None:
+        self.recent_mcp_calls = []
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.lower().startswith("(no "):
+                continue
+            self.recent_mcp_calls.append(line)
+        while len(self.recent_mcp_calls) > MAX_RECENT_MCP_TOOL_CALLS:
+            self.recent_mcp_calls.pop(0)
+
+    def append_mcp_tool_invocation(self, router_command: str) -> None:
+        """Persist one router ``CALL …`` or ``TASK_PLAN …`` line to memory tail + audit log."""
+        cmd = router_command.strip()
+        if cmd.startswith("CALL "):
+            entry_body = cmd
+        elif cmd.startswith("TASK_PLAN "):
+            entry_body = cmd if len(cmd) <= 2000 else cmd[:1997] + "..."
+        else:
+            return
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"{ts} | {entry_body}"
+        self.recent_mcp_calls.append(entry)
+        while len(self.recent_mcp_calls) > MAX_RECENT_MCP_TOOL_CALLS:
+            self.recent_mcp_calls.pop(0)
+        audit = self.path.parent / TOOL_AUDIT_LOG_NAME
+        try:
+            with audit.open("a", encoding="utf-8") as fp:
+                fp.write(entry + "\n")
+        except OSError:
+            pass
+
     def build_router_context(self, new_user_query: str) -> str:
         """Block inserted into the OpenAI router prompt (history + state + new query)."""
         lines: list[str] = [
@@ -113,6 +164,19 @@ class MemoryContext:
                 lines.append(f"USER: {u}")
                 lines.append(f"ASSISTANT: {a}")
                 lines.append("")
+        lines.extend(
+            [
+                "==============================",
+                "RECENT MCP TOOL CALLS",
+                "==============================",
+            ]
+        )
+        if not self.recent_mcp_calls:
+            lines.append("(no MCP tool invocations yet in sliding window)")
+        else:
+            for t in self.recent_mcp_calls:
+                lines.append(t)
+            lines.append("")
         lines.extend(
             [
                 "==============================",
@@ -148,6 +212,19 @@ class MemoryContext:
         lines.extend(
             [
                 "==============================",
+                "RECENT MCP TOOL CALLS",
+                "==============================",
+            ]
+        )
+        if not self.recent_mcp_calls:
+            lines.append("(no MCP tool invocations yet in sliding window)")
+        else:
+            for t in self.recent_mcp_calls:
+                lines.append(t)
+            lines.append("")
+        lines.extend(
+            [
+                "==============================",
                 "ROBOT STATE",
                 "==============================",
                 f"last_command: {self.state.last_command}",
@@ -172,7 +249,29 @@ class MemoryContext:
         if cmd.startswith("CALL teleop_move"):
             d = _re_first(r"direction=(\S+)", cmd) or "?"
             t = _re_first(r"duration_sec=([\d.]+)", cmd) or "?"
-            self.state.last_command = f"teleop_move(direction={d},duration_sec={t})"
+            ls = _re_first(r"linear_speed=([\d.eE+-]+)", cmd)
+            azs = _re_first(r"angular_speed=([\d.eE+-]+)", cmd)
+            phz = _re_first(r"publish_hz=([\d.eE+-]+)", cmd)
+            extra = ""
+            if ls:
+                extra += f",linear_speed={ls}"
+            if azs:
+                extra += f",angular_speed={azs}"
+            if phz:
+                extra += f",publish_hz={phz}"
+            self.state.last_command = (
+                f"teleop_move(direction={d},duration_sec={t}{extra})"
+            )
+            self.state.last_result = _result_bucket(rep, short_rep)
+
+        elif cmd.startswith("CALL teleop_sequence"):
+            self.state.last_command = "teleop_sequence(...)"
+            self.state.last_result = _result_bucket(rep, short_rep)
+
+        elif cmd.startswith("TASK_PLAN "):
+            self.state.last_command = _short_text(
+                "task_plan " + cmd[len("TASK_PLAN ") :].strip(), 160
+            )
             self.state.last_result = _result_bucket(rep, short_rep)
 
         elif cmd.startswith("CALL set_navigation_goal"):

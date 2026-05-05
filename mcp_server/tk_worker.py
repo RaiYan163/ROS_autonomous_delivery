@@ -63,8 +63,8 @@ async def _async_main(
                     if not text:
                         continue
                     try:
-                        reply = await wrapper.handle(text)
-                        tk_q.put(("reply", text, reply))
+                        reply, routed = await wrapper.handle(text)
+                        tk_q.put(("reply", text, reply, routed))
                     except Exception as exc:  # noqa: BLE001 — surface to UI
                         tk_q.put(("error", f"{type(exc).__name__}: {exc}"))
     except Exception as exc:  # noqa: BLE001
@@ -78,8 +78,8 @@ def start_mcp_worker(
     Start daemon thread running asyncio MCP client.
 
     Returns ``(thread, user_queue, tk_queue, stop_event)``.
-    Push user strings to ``user_queue``; receive ``("reply", user, text)`` or ``("error", msg)``
-    or ``("info", msg)`` on ``tk_queue``. Push ``None`` to ``user_queue`` to stop the loop.
+    Push user strings to ``user_queue``; receive ``("reply", user, assistant_text,
+    router_line)``, ``("error", msg)``, or ``("info", msg)`` on ``tk_queue``. Push ``None`` to ``user_queue`` to stop the loop.
     """
     user_q: queue.Queue = queue.Queue()
     tk_q: queue.Queue = queue.Queue()

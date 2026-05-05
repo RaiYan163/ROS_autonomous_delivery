@@ -10,5 +10,6 @@ finalproj/arm/tools/DynamixelWizard2/
 # Local / collaborator analysis (not tracked)
 docs/MCP_IMPLEMENTATION_ANALYSIS.txt
 
-# MCP client sliding-window memory (session / debug; do not commit)
+# MCP client sliding-window memory + MCP tool audit (session / debug; do not commit)
 memory_context.txt
+mcp_tool_calls.log
